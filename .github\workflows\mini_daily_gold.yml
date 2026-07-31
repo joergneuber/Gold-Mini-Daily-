@@ -1,0 +1,40 @@
+name: Mini Daily Gold
+
+on:
+  schedule:
+    # alle 3 Stunden, Mo-Fr, 06:00-21:00 UTC (an die CME-Handelszeiten anpassen)
+    - cron: "0 6,9,12,15,18,21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Report erzeugen
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python mini_daily_gold.py
+
+      - name: Nach Google Drive hochladen
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+        run: python upload_to_drive.py
+
+      - name: Mail versenden
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
+        run: python send_mail.py
