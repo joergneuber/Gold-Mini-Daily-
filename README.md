@@ -1,1 +1,1 @@
-# Gold-Mini-Daily-
+# Gold-Mini-Daily
