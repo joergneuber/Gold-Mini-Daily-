@@ -19,7 +19,9 @@ import matplotlib.dates as mdates
 import yfinance as yf
 import google.generativeai as genai
 
-TICKER = "XAU=X"  # Spot-Gold (XAU/USD), statt Future GC=F
+TICKER = "GC=F"  # Gold-Future. Yahoo/yfinance bietet keinen zuverlässig abrufbaren
+                  # Spot-Ticker (XAUUSD=X / XAU=X liefern 404) - GC=F liegt fast immer
+                  # nur wenige USD neben dem echten Spot-Kurs.
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
 
@@ -84,7 +86,7 @@ def generiere_rueckblick(daten, pivots, tendenz):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-flash-latest")
 
-    prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold-Spot (XAU/USD).
+    prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
 Schreibe einen kurzen Rückblick-Absatz (3-5 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
 
@@ -141,7 +143,7 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     ax.tick_params(colors="#a89d87", labelsize=10)
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
-    ax.set_title("Gold Spot (XAU/USD) - Intraday", color="#ece6d9", fontsize=13, loc="left")
+    ax.set_title("Gold (GC=F) - Intraday", color="#ece6d9", fontsize=13, loc="left")
 
     fig.tight_layout()
     fig.savefig(pfad, facecolor=fig.get_facecolor())
