@@ -82,7 +82,7 @@ def generiere_rueckblick(daten, pivots, tendenz):
         return "(Kein GEMINI_API_KEY gesetzt - Rückblick konnte nicht generiert werden.)"
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel("gemini-flash-latest")
 
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
 Schreibe einen kurzen Rückblick-Absatz (3-5 Sätze, deutsch, sachlich, ohne Anrede,
@@ -110,27 +110,80 @@ Prognosen mit Sicherheit formuliert."""
 
 
 def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
-    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=150)
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
     ax.set_facecolor("#14110d")
 
-    ax.plot(intraday_reihe.index, intraday_reihe["Close"], color="#e8b95c", linewidth=1.4)
+    preise = intraday_reihe["Close"]
+    ax.plot(intraday_reihe.index, preise, color="#e8b95c", linewidth=1.6)
+
+    # Y-Achse an den tatsächlichen Kursbereich anpassen (nicht an die Pivot-Linien) -
+    # sonst zieht ein weit entfernter Widerstand/Support die Skala unnötig auseinander.
+    puffer = (preise.max() - preise.min()) * 0.15
+    y_unten = preise.min() - puffer
+    y_oben = preise.max() + puffer
 
     for r in pivots["r"]:
-        ax.axhline(r, color="#b5654f", linewidth=0.7, linestyle="--", alpha=0.7)
+        if y_unten <= r <= y_oben:
+            ax.axhline(r, color="#b5654f", linewidth=0.9, linestyle="--", alpha=0.8)
+            ax.text(intraday_reihe.index[-1], r, f" {r:,.0f}", color="#b5654f",
+                     fontsize=9, va="center", ha="left")
     for s in pivots["s"]:
-        ax.axhline(s, color="#7fae6f", linewidth=0.7, linestyle="--", alpha=0.7)
+        if y_unten <= s <= y_oben:
+            ax.axhline(s, color="#7fae6f", linewidth=0.9, linestyle="--", alpha=0.8)
+            ax.text(intraday_reihe.index[-1], s, f" {s:,.0f}", color="#7fae6f",
+                     fontsize=9, va="center", ha="left")
+
+    ax.set_ylim(y_unten, y_oben)
+    ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
 
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m %H:%M"))
-    ax.tick_params(colors="#a89d87", labelsize=8)
+    ax.tick_params(colors="#a89d87", labelsize=10)
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
-    ax.set_title("Gold (GC=F) - Intraday", color="#ece6d9", fontsize=11, loc="left")
+    ax.set_title("Gold (GC=F) - Intraday", color="#ece6d9", fontsize=13, loc="left")
 
     fig.tight_layout()
     fig.savefig(pfad, facecolor=fig.get_facecolor())
     plt.close(fig)
     return pfad
+
+
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text):
+    heute = datetime.now(timezone.utc).astimezone().strftime("%A, %d. %B %Y")
+    zeit = daten["letzter_zeitpunkt"].strftime("%d.%m. %H:%M")
+
+    def liste(werte):
+        return " / ".join(f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") for v in werte)
+
+    def fmt(n):
+        return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    text = f"""MINI DAILY: GOLD
+{heute} - Stand {zeit}
+
+VORBOERSLICHE TENDENZ
+{tendenz_label} ({tendenz_pct:+.2f}%)
+
+WIDERSTAENDE (INTRADAY)
+{liste(pivots['r'])} USD
+
+UNTERSTUETZUNGEN (INTRADAY)
+{liste(pivots['s'])} USD
+
+REALTIME INDIKATION
+{fmt(daten['realtime'])} USD
+
+SCHLUSSKURS (VORTAG)
+{fmt(daten['prev_close'])} USD
+
+RUECKBLICK
+{rueckblick_text}
+
+---
+Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: yfinance
+"""
+    return text
 
 
 def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname):
@@ -187,14 +240,17 @@ def main():
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label)
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots)
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
+    with open("mini_daily_gold.txt", "w", encoding="utf-8") as f:
+        f.write(text)
 
     print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
-    print("Report geschrieben: mini_daily_gold.html, chart.png")
+    print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png")
 
 
 if __name__ == "__main__":
