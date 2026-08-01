@@ -82,7 +82,7 @@ def generiere_rueckblick(daten, pivots, tendenz):
         return "(Kein GEMINI_API_KEY gesetzt - Rückblick konnte nicht generiert werden.)"
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel("gemini-flash-latest")
 
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
 Schreibe einen kurzen Rückblick-Absatz (3-5 Sätze, deutsch, sachlich, ohne Anrede,
