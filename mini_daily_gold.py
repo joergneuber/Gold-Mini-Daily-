@@ -19,7 +19,7 @@ import matplotlib.dates as mdates
 import yfinance as yf
 import google.generativeai as genai
 
-TICKER = "XAUUSD=X"  # Spot-Gold (XAU/USD), statt Future GC=F
+TICKER = "XAU=X"  # Spot-Gold (XAU/USD), statt Future GC=F
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
 
