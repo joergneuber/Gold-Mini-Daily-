@@ -1,6 +1,10 @@
 """
 Verschickt den Report per E-Mail (SMTP, z.B. Gmail mit App-Passwort).
 
+Schickt sowohl eine HTML-Version als auch eine reine Klartext-Version mit
+(als Fallback UND als Anhang) - manche Mail-Clients entfernen Style-Angaben
+aus dem HTML, dann bleibt der Klartext lesbar.
+
 Benötigte Secrets:
 - SMTP_HOST (z.B. smtp.gmail.com)
 - SMTP_PORT (z.B. 587)
@@ -18,16 +22,24 @@ from datetime import datetime
 def main():
     with open("mini_daily_gold.html", "r", encoding="utf-8") as f:
         html = f.read()
+    with open("mini_daily_gold.txt", "r", encoding="utf-8") as f:
+        text = f.read()
 
     msg = EmailMessage()
     msg["Subject"] = f"Mini Daily: Gold - {datetime.now().strftime('%d.%m.%Y %H:%M')}"
     msg["From"] = os.environ["SMTP_USER"]
     msg["To"] = os.environ["MAIL_EMPFAENGER"]
-    msg.set_content("Dieser Report benötigt einen HTML-fähigen E-Mail-Client.")
+    msg.set_content(text)
     msg.add_alternative(html, subtype="html")
 
     with open("chart.png", "rb") as img:
         msg.get_payload()[1].add_related(img.read(), maintype="image", subtype="png", cid="chart")
+
+    # Klartext zusätzlich als Anhang, falls der Mail-Client trotzdem nur HTML anzeigt
+    zeitstempel = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    with open("mini_daily_gold.txt", "rb") as f:
+        msg.add_attachment(f.read(), maintype="text", subtype="plain",
+                            filename=f"{zeitstempel}_Briefing.txt")
 
     with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"])) as server:
         server.starttls()
