@@ -1,5 +1,6 @@
 """
-Lädt mini_daily_gold.html und chart.png in einen festen Google-Drive-Ordner hoch.
+Lädt mini_daily_gold.html, mini_daily_gold.txt und chart.png in einen festen
+Google-Drive-Ordner hoch, mit lesbaren Dateinamen (Zeitstempel_Briefing.* / Grafik.png).
 
 Nutzt OAuth mit einem privaten Google-Konto (kein Service-Account - Service-Accounts
 haben kein eigenes Speicherkontingent auf normalem Drive). Die Datei landet dadurch
@@ -33,9 +34,9 @@ def hole_service():
     return build("drive", "v3", credentials=creds)
 
 
-def hochladen(pfad, mime_type, ordner_id, service):
+def hochladen(pfad, mime_type, ordner_id, service, anzeige_name):
     zeitstempel = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    dateiname = f"{zeitstempel}_{os.path.basename(pfad)}"
+    dateiname = f"{zeitstempel}_{anzeige_name}"
     metadata = {"name": dateiname, "parents": [ordner_id]}
     media = MediaFileUpload(pfad, mimetype=mime_type)
     service.files().create(body=metadata, media_body=media, fields="id").execute()
@@ -50,8 +51,9 @@ def main():
             "Nur den Teil nach '/folders/' verwenden."
         )
     service = hole_service()
-    hochladen("mini_daily_gold.html", "text/html", ordner_id, service)
-    hochladen("chart.png", "image/png", ordner_id, service)
+    hochladen("mini_daily_gold.html", "text/html", ordner_id, service, "Briefing.html")
+    hochladen("mini_daily_gold.txt", "text/plain", ordner_id, service, "Briefing.txt")
+    hochladen("chart.png", "image/png", ordner_id, service, "Grafik.png")
 
 
 if __name__ == "__main__":
