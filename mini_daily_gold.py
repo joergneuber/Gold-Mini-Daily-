@@ -303,8 +303,8 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
     ax.plot(schluss.index, trend_werte, color=trend_farbe, linewidth=1.8,
              linestyle="-", alpha=0.9, zorder=5)
-    ax.text(schluss.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
-             fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
+    ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
+             fontsize=10, fontweight="bold", va="bottom", ha="left")
 
     if zonen:
         for preis, treffer in zonen["widerstandszonen"]:
