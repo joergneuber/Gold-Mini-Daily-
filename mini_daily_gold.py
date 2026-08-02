@@ -264,6 +264,41 @@ Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
         return f"(Rückblick-Generierung fehlgeschlagen: {exc})"
 
 
+def finde_konsolidierungszonen(preisreihe, fenster, schwelle_pct, min_laenge, max_zonen=2):
+    """Findet Phasen mit geringer Preisspanne (Seitwärtsbewegung) per Rolling-Fenster.
+    Ein Punkt gilt als 'seitwärts', wenn die Spanne (Hoch-Tief) der letzten `fenster`
+    Werte weniger als `schwelle_pct` Prozent des Preises beträgt. Zusammenhängende
+    seitwärts-Phasen mit mindestens `min_laenge` Punkten werden zu einer Zone
+    zusammengefasst. Gibt die `max_zonen` jüngsten Zonen zurück (Liste von
+    (start_zeit, end_zeit, tief, hoch))."""
+    rolling_max = preisreihe.rolling(fenster).max()
+    rolling_min = preisreihe.rolling(fenster).min()
+    spanne_pct = (rolling_max - rolling_min) / preisreihe * 100
+    ist_seitwaerts = spanne_pct <= schwelle_pct
+
+    zonen = []
+    start = None
+    werte = ist_seitwaerts.values
+    for i, flag in enumerate(werte):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            ende = i - 1
+            if ende - start + 1 >= min_laenge:
+                seg_start = max(0, start - fenster + 1)
+                segment = preisreihe.iloc[seg_start:ende + 1]
+                zonen.append((segment.index[0], segment.index[-1], segment.min(), segment.max()))
+            start = None
+    if start is not None:
+        ende = len(werte) - 1
+        if ende - start + 1 >= min_laenge:
+            seg_start = max(0, start - fenster + 1)
+            segment = preisreihe.iloc[seg_start:ende + 1]
+            zonen.append((segment.index[0], segment.index[-1], segment.min(), segment.max()))
+
+    return zonen[-max_zonen:]
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -285,18 +320,18 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
 
-    # Konsolidierungszone: Box um Hoch/Tief der jüngeren Kurshälfte (dieselbe Phase wie
-    # die Trendlinie), sichtbar macht die aktuelle Seitwärtsspanne, ähnlich einer
-    # manuell eingezeichneten Range-Box in klassischer Chartanalyse.
-    kons_min, kons_max = trend_ausschnitt.min(), trend_ausschnitt.max()
-    x_start = mdates.date2num(trend_ausschnitt.index[0])
-    x_end = mdates.date2num(trend_ausschnitt.index[-1])
-    ax.add_patch(Rectangle(
-        (x_start, kons_min), x_end - x_start, kons_max - kons_min,
-        linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
-    ))
-    ax.text(x_end, kons_max, " Konsolidierung", color="#e8e0c8", fontsize=8.5,
-             style="italic", va="bottom", ha="left")
+    # Konsolidierungszonen: automatisch erkannte Seitwärtsphasen (Rolling-Fenster von
+    # 1h bei 5-Min-Kerzen, Spanne < 1,0% gilt als seitwärts) statt einer festen Zeithälfte.
+    kons_zonen = finde_konsolidierungszonen(preise, fenster=12, schwelle_pct=1.0, min_laenge=12)
+    for start_zeit, end_zeit, tief, hoch in kons_zonen:
+        x_start = mdates.date2num(start_zeit)
+        x_end = mdates.date2num(end_zeit)
+        ax.add_patch(Rectangle(
+            (x_start, tief), x_end - x_start, hoch - tief,
+            linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
+        ))
+        ax.text(end_zeit, hoch, " Konsolidierung", color="#e8e0c8", fontsize=8.5,
+                 style="italic", va="bottom", ha="left")
 
     # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
@@ -403,6 +438,19 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
              linestyle="-", alpha=0.9, zorder=5)
     ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom", ha="left")
+
+    # Konsolidierungszonen: gleiche Erkennung wie im Intraday-Chart, aber mit auf
+    # Tagesdaten abgestimmten Parametern (10 Handelstage Fenster, Spanne < 3,0%).
+    kons_zonen = finde_konsolidierungszonen(schluss, fenster=10, schwelle_pct=3.0, min_laenge=10)
+    for start_zeit, end_zeit, tief, hoch in kons_zonen:
+        x_start = mdates.date2num(start_zeit)
+        x_end = mdates.date2num(end_zeit)
+        ax.add_patch(Rectangle(
+            (x_start, tief), x_end - x_start, hoch - tief,
+            linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
+        ))
+        ax.text(end_zeit, hoch, " Konsolidierung", color="#e8e0c8", fontsize=8.5,
+                 style="italic", va="bottom", ha="left")
 
     if zonen:
         for preis, treffer, fenster in zonen["widerstandszonen"]:
