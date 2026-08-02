@@ -119,25 +119,40 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     preise = intraday_reihe["Close"]
     ax.plot(intraday_reihe.index, preise, color="#e8b95c", linewidth=1.6)
 
-    # Y-Achse an den tatsächlichen Kursbereich anpassen (nicht an die Pivot-Linien) -
-    # sonst zieht ein weit entfernter Widerstand/Support die Skala unnötig auseinander.
+    # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
     y_unten = preise.min() - puffer
     y_oben = preise.max() + puffer
 
+    # Die jeweils nächstgelegene Widerstands-/Unterstützungslinie IMMER mit einbeziehen,
+    # auch wenn sie knapp außerhalb des reinen Kursbereichs liegt - sonst fehlt oft
+    # jede Orientierung nach oben oder unten.
+    r_oberhalb = [r for r in pivots["r"] if r > y_oben]
+    if r_oberhalb:
+        y_oben = max(y_oben, min(r_oberhalb) * 1.002)
+    s_unterhalb = [s for s in pivots["s"] if s < y_unten]
+    if s_unterhalb:
+        y_unten = min(y_unten, max(s_unterhalb) * 0.998)
+
     for r in pivots["r"]:
         if y_unten <= r <= y_oben:
-            ax.axhline(r, color="#b5654f", linewidth=0.9, linestyle="--", alpha=0.8)
-            ax.text(intraday_reihe.index[-1], r, f" {r:,.0f}", color="#b5654f",
-                     fontsize=9, va="center", ha="left")
+            ax.axhline(r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
+            ax.text(intraday_reihe.index[-1], r, f" {r:,.0f}", color="#e8887a",
+                     fontsize=9.5, fontweight="bold", va="center", ha="left")
     for s in pivots["s"]:
         if y_unten <= s <= y_oben:
-            ax.axhline(s, color="#7fae6f", linewidth=0.9, linestyle="--", alpha=0.8)
-            ax.text(intraday_reihe.index[-1], s, f" {s:,.0f}", color="#7fae6f",
-                     fontsize=9, va="center", ha="left")
+            ax.axhline(s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
+            ax.text(intraday_reihe.index[-1], s, f" {s:,.0f}", color="#9fcf8f",
+                     fontsize=9.5, fontweight="bold", va="center", ha="left")
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
+
+    # Feineres Gitter: Hauptlinien + gedämpfte Zwischenlinien für bessere Ablesbarkeit
+    spanne = y_oben - y_unten
+    schrittweite = 5 if spanne < 80 else (10 if spanne < 160 else 20)
+    ax.yaxis.set_major_locator(plt.MultipleLocator(schrittweite))
+    ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
 
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m %H:%M"))
     ax.tick_params(colors="#a89d87", labelsize=10)
