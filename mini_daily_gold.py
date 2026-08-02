@@ -126,8 +126,9 @@ def bestimme_tendenz(realtime, prev_close):
     return "Seitwärts", pct
 
 
-def generiere_rueckblick(daten, pivots, tendenz, reaktionszonen, zonen_monate=36):
-    """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen."""
+def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
+    """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
+    zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return "(Kein GEMINI_API_KEY gesetzt - Rückblick konnte nicht generiert werden.)"
@@ -135,25 +136,25 @@ def generiere_rueckblick(daten, pivots, tendenz, reaktionszonen, zonen_monate=36
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-flash-latest")
 
-    if reaktionszonen and (reaktionszonen["widerstandszonen"] or reaktionszonen["supportzonen"]):
-        w_zeilen = "\n".join(
-            f"- ca. {preis:,.0f} USD ({treffer}x als Hoch bestätigt in den letzten {zonen_monate} Monaten)"
-            for preis, treffer in reaktionszonen["widerstandszonen"]
-        ).replace(",", ".")
-        s_zeilen = "\n".join(
-            f"- ca. {preis:,.0f} USD ({treffer}x als Tief bestätigt in den letzten {zonen_monate} Monaten)"
-            for preis, treffer in reaktionszonen["supportzonen"]
-        ).replace(",", ".")
-        zonen_block = f"""
-Strukturelle Reaktionszonen ({zonen_monate}-Monats-Historie, mehrfach bestätigte Hoch-/Tiefpunkte -
-diese sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Pivots):
-Widerstandszonen:
-{w_zeilen if w_zeilen else '(keine mit mind. 2 Bestätigungen gefunden)'}
-Supportzonen:
-{s_zeilen if s_zeilen else '(keine mit mind. 2 Bestätigungen gefunden)'}
-"""
-    else:
-        zonen_block = f"\n(Keine {zonen_monate}-Monats-Reaktionszonen verfügbar für diesen Lauf.)\n"
+    zonen_bloecke = []
+    for monate in sorted(zonen_je_zeitraum.keys()):
+        zonen = zonen_je_zeitraum[monate]
+        if not zonen or (not zonen["widerstandszonen"] and not zonen["supportzonen"]):
+            zonen_bloecke.append(f"{monate}-Monats-Fenster: keine Zonen mit mind. 2 Bestätigungen gefunden.")
+            continue
+        w_zeilen = "; ".join(
+            f"ca. {preis:,.0f} USD ({treffer}x)".replace(",", ".")
+            for preis, treffer in zonen["widerstandszonen"]
+        )
+        s_zeilen = "; ".join(
+            f"ca. {preis:,.0f} USD ({treffer}x)".replace(",", ".")
+            for preis, treffer in zonen["supportzonen"]
+        )
+        zonen_bloecke.append(
+            f"{monate}-Monats-Fenster - Widerstandszonen: {w_zeilen or 'keine'} | "
+            f"Supportzonen: {s_zeilen or 'keine'}"
+        )
+    zonen_block = "\n".join(zonen_bloecke)
 
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
 Schreibe einen kurzen Rückblick-Absatz (4-6 Sätze, deutsch, sachlich, ohne Anrede,
@@ -169,17 +170,23 @@ Intraday-Daten (kurzfristig):
 - Vorbörsliche Tendenz: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
+
+Strukturelle Reaktionszonen (mehrfach bestätigte Hoch-/Tiefpunkte je Zeitfenster - diese
+sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Pivots; kürzere
+Fenster zeigen eher aktuell relevante Zonen, längere Fenster eher übergeordnete Struktur):
 {zonen_block}
+
 Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken (Nähe zu einem
 Widerstand/einer Unterstützung, mögliche Trigger-Kurse für einen Ausbruch nach oben
 oder eine Trendwende nach unten). Nenne konkrete Kurswerte.
 
-Ordne die Kursbewegung anschließend, gestützt auf die {zonen_monate}-Monats-Reaktionszonen (falls
-vorhanden), einer gängigen charttechnischen Formation zu (z.B. aufsteigendes/absteigendes/
-symmetrisches Dreieck, Seitwärtskanal, Doppel-Top, Doppel-Boden, Flagge, Keil) und benenne
-sie explizit im Text. Falls auch die {zonen_monate}-Monats-Zonen für eine seriöse Einschätzung nicht
-ausreichen, sag das knapp statt zu spekulieren - keine erfundene Formation nennen, nur
-um etwas zu benennen.
+Ordne die Kursbewegung anschließend, gestützt auf die Reaktionszonen der verschiedenen
+Zeitfenster (falls vorhanden - bevorzuge dabei das kürzeste Fenster mit brauchbaren
+Zonen nahe am aktuellen Kurs), einer gängigen charttechnischen Formation zu (z.B.
+aufsteigendes/absteigendes/symmetrisches Dreieck, Seitwärtskanal, Doppel-Top,
+Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text. Falls auch über alle
+Zeitfenster hinweg keine seriöse Einschätzung möglich ist, sag das knapp statt zu
+spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
 
 Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
 
@@ -358,13 +365,17 @@ def main():
     pivots = klassische_pivots(daten["prev_high"], daten["prev_low"], daten["prev_close"])
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
 
-    langfrist = hole_langfrist_daten(monate=36)
-    reaktionszonen = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
-    if reaktionszonen:
-        print(f"Widerstandszonen (36M): {reaktionszonen['widerstandszonen']}")
-        print(f"Supportzonen (36M): {reaktionszonen['supportzonen']}")
+    zonen_je_zeitraum = {}
+    for monate in (3, 6, 36):
+        langfrist = hole_langfrist_daten(monate=monate)
+        zonen_je_zeitraum[monate] = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
+        if zonen_je_zeitraum[monate]:
+            print(f"Widerstandszonen ({monate}M): {zonen_je_zeitraum[monate]['widerstandszonen']}")
+            print(f"Supportzonen ({monate}M): {zonen_je_zeitraum[monate]['supportzonen']}")
+        else:
+            print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
-    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, reaktionszonen, zonen_monate=36)
+    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum)
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots)
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
