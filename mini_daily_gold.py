@@ -12,10 +12,12 @@ Datenquelle: yfinance (GC=F, Gold-Future). Kein API-Key nötig.
 import os
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import numpy as np
 import yfinance as yf
 import google.generativeai as genai
 
@@ -119,6 +121,19 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     preise = intraday_reihe["Close"]
     ax.plot(intraday_reihe.index, preise, color="#e8b95c", linewidth=1.6)
 
+    # Trendlinie: einfache lineare Regression über die letzte Hälfte der Kursreihe
+    # (aktuellerer Trend statt über den gesamten 2-Tage-Zeitraum gemittelt)
+    trend_ausschnitt = preise.iloc[len(preise) // 2:]
+    x_num = mdates.date2num(trend_ausschnitt.index)
+    steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
+    trend_werte = steigung * x_num + achsenabschnitt
+    trend_farbe = "#6fa8dc" if steigung > 0 else "#e69138"
+    trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
+    ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8,
+             linestyle="-", alpha=0.9, zorder=5)
+    ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
+             fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
+
     # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
     y_unten = preise.min() - puffer
@@ -167,7 +182,7 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
 
 
 def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text):
-    heute = datetime.now(timezone.utc).astimezone().strftime("%A, %d. %B %Y")
+    heute = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%A, %d. %B %Y")
     zeit = daten["letzter_zeitpunkt"].strftime("%d.%m. %H:%M")
 
     def liste(werte):
@@ -204,7 +219,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: yf
 
 
 def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname):
-    heute = datetime.now(timezone.utc).astimezone().strftime("%A, %d. %B %Y")
+    heute = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%A, %d. %B %Y")
     zeit = daten["letzter_zeitpunkt"].strftime("%d.%m. %H:%M")
 
     def level_liste(werte, farbe):
