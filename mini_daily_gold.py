@@ -106,6 +106,34 @@ def analysiere_reaktionszonen(daily, fenster=5, bucket_usd=15, min_treffer=2, to
     }
 
 
+def kombiniere_zonen(zonen_je_zeitraum, bucket_usd=15, top_n=6):
+    """Führt die Zonen aus mehreren Zeitfenstern (z.B. 3/6/36 Monate) zusammen.
+    Zonen aus unterschiedlichen Fenstern, die preislich nah beieinander liegen,
+    werden zu einer Zone verschmolzen (Trefferzahlen addiert, Zeitfenster vermerkt)."""
+    def sammle(key):
+        buckets = {}
+        for monate, zonen in zonen_je_zeitraum.items():
+            if not zonen:
+                continue
+            for preis, treffer in zonen[key]:
+                bucket = round(preis / bucket_usd) * bucket_usd
+                eintrag = buckets.setdefault(bucket, {"preise": [], "treffer": 0, "fenster": set()})
+                eintrag["preise"].append(preis)
+                eintrag["treffer"] += treffer
+                eintrag["fenster"].add(monate)
+        ergebnis = [
+            (sum(e["preise"]) / len(e["preise"]), e["treffer"], sorted(e["fenster"]))
+            for e in buckets.values()
+        ]
+        ergebnis.sort(key=lambda z: -z[1])
+        return ergebnis[:top_n]
+
+    return {
+        "widerstandszonen": sammle("widerstandszonen"),
+        "supportzonen": sammle("supportzonen"),
+    }
+
+
 def klassische_pivots(high, low, close):
     p = (high + low + close) / 3
     r1 = 2 * p - low
@@ -203,7 +231,7 @@ Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
         return f"(Rückblick-Generierung fehlgeschlagen: {exc})"
 
 
-def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
+def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
     ax.set_facecolor("#14110d")
@@ -239,6 +267,19 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     if s_unterhalb:
         y_unten = min(y_unten, max(s_unterhalb) * 0.998)
 
+    # Zusätzlich das nächstgelegene übergeordnete Struktur-Level (aus den 3/6/36-Monats-
+    # Reaktionszonen) mit einbeziehen, falls eines nah genug ist, um noch relevant zu sein.
+    struktur_r_nahe = struktur_s_nahe = None
+    if strukturzonen:
+        struktur_r_oben = [p for p, *_ in strukturzonen["widerstandszonen"] if p > y_oben]
+        if struktur_r_oben:
+            struktur_r_nahe = min(struktur_r_oben)
+            y_oben = max(y_oben, struktur_r_nahe * 1.002)
+        struktur_s_unten = [p for p, *_ in strukturzonen["supportzonen"] if p < y_unten]
+        if struktur_s_unten:
+            struktur_s_nahe = max(struktur_s_unten)
+            y_unten = min(y_unten, struktur_s_nahe * 0.998)
+
     for r in pivots["r"]:
         if y_unten <= r <= y_oben:
             ax.axhline(r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
@@ -249,6 +290,17 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
             ax.axhline(s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
             ax.text(intraday_reihe.index[-1], s, f" Support {s:,.0f}", color="#9fcf8f",
                      fontsize=9.5, fontweight="bold", va="center", ha="left")
+
+    # Übergeordnete Struktur-Level: gepunktet statt gestrichelt, damit klar erkennbar
+    # ist, dass sie aus der längerfristigen Historie stammen (nicht Intraday-Pivots).
+    if struktur_r_nahe is not None:
+        ax.axhline(struktur_r_nahe, color="#b5654f", linewidth=1.3, linestyle=":", alpha=0.6)
+        ax.text(intraday_reihe.index[-1], struktur_r_nahe, f" Struktur-Widerstand {struktur_r_nahe:,.0f}",
+                 color="#e8887a", fontsize=8.5, style="italic", va="center", ha="left")
+    if struktur_s_nahe is not None:
+        ax.axhline(struktur_s_nahe, color="#7fae6f", linewidth=1.3, linestyle=":", alpha=0.6)
+        ax.text(intraday_reihe.index[-1], struktur_s_nahe, f" Struktur-Support {struktur_s_nahe:,.0f}",
+                 color="#9fcf8f", fontsize=8.5, style="italic", va="center", ha="left")
 
     # Tatsächliches Intraday-Hoch/-Tief zusätzlich als schlichte Referenzlinien -
     # ergänzt die rechnerischen Pivot-Level um die real erreichten Extrempunkte.
@@ -307,13 +359,15 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
              fontsize=10, fontweight="bold", va="bottom", ha="left")
 
     if zonen:
-        for preis, treffer in zonen["widerstandszonen"]:
+        for preis, treffer, fenster in zonen["widerstandszonen"]:
+            fenster_txt = "/".join(f"{m}M" for m in fenster)
             ax.axhline(preis, color="#b5654f", linewidth=1.0, linestyle="--", alpha=0.8)
-            ax.text(daily.index[-1], preis, f" Widerstand {preis:,.0f} ({treffer}x)".replace(",", "."),
+            ax.text(daily.index[-1], preis, f" Widerstand {preis:,.0f} ({treffer}x, {fenster_txt})".replace(",", "."),
                      color="#e8887a", fontsize=9, fontweight="bold", va="center", ha="left")
-        for preis, treffer in zonen["supportzonen"]:
+        for preis, treffer, fenster in zonen["supportzonen"]:
+            fenster_txt = "/".join(f"{m}M" for m in fenster)
             ax.axhline(preis, color="#7fae6f", linewidth=1.0, linestyle="--", alpha=0.8)
-            ax.text(daily.index[-1], preis, f" Support {preis:,.0f} ({treffer}x)".replace(",", "."),
+            ax.text(daily.index[-1], preis, f" Support {preis:,.0f} ({treffer}x, {fenster_txt})".replace(",", "."),
                      color="#9fcf8f", fontsize=9, fontweight="bold", va="center", ha="left")
 
     ax.margins(x=0.10)
@@ -438,10 +492,11 @@ def main():
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum)
-    chart_pfad = baue_chart(daten["intraday_reihe"], pivots)
+    kombinierte_zonen = kombiniere_zonen(zonen_je_zeitraum)
+    chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen)
     chart_lang_pfad = None
     if daily_6m is not None:
-        chart_lang_pfad = baue_langfrist_chart(daily_6m, zonen_je_zeitraum.get(6))
+        chart_lang_pfad = baue_langfrist_chart(daily_6m, kombinierte_zonen)
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
 
