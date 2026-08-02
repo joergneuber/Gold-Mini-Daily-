@@ -397,8 +397,8 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
             (x_start, tief), x_end - x_start, hoch - tief,
             linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
         ))
-        ax.text(end_zeit, hoch, " Range", color="#e8e0c8", fontsize=8.5,
-                 style="italic", va="bottom", ha="left")
+        ax.text(start_zeit, hoch, "Range  ", color="#e8e0c8", fontsize=8.5,
+                 style="italic", va="bottom", ha="right")
 
     # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
@@ -469,18 +469,19 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
 
     # Umkehrzonen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
     # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala
-    # nicht erneut aufblähen (die Achse ist an dieser Stelle schon final).
-    umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe)
+    # nicht erneut aufblähen (die Achse ist an dieser Stelle schon final). Eigene
+    # Farbe (Blau) statt Creme, damit sie sich klar von der Range-Box unterscheiden.
+    umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe, top_n=2)
     for preis, treffer in umkehrzonen["widerstandszonen"]:
         if y_unten <= preis <= y_oben:
-            ax.axhline(preis, color="#e8e0c8", linewidth=1.0, linestyle="-", alpha=0.6)
-            ax.text(intraday_reihe.index[0], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#e8e0c8", fontsize=7.5, va="bottom", ha="left")
+            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
+            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
     for preis, treffer in umkehrzonen["supportzonen"]:
         if y_unten <= preis <= y_oben:
-            ax.axhline(preis, color="#e8e0c8", linewidth=1.0, linestyle="-", alpha=0.6)
-            ax.text(intraday_reihe.index[0], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#e8e0c8", fontsize=7.5, va="bottom", ha="left")
+            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
+            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
