@@ -332,6 +332,38 @@ def finde_range_boxen(preisreihe, fenster=5, bucket_usd=30, min_treffer=2, segme
     return boxen
 
 
+def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_treffer=2, top_n=3):
+    """Analog zu analysiere_reaktionszonen (die für Tagesdaten schon existiert), aber
+    auf Intraday-Kerzen angewendet: findet Swing-Hochs/-Tiefs und gruppiert sie zu
+    Umkehrzonen mit mehreren Berührungen. Anders als finde_range_box werden hier
+    NICHT zwei Level zu einer Box gepaart, sondern jede für sich mehrfach bestätigte
+    Zone einzeln zurückgegeben - näher an dem, was man beim manuellen Einzeichnen
+    mehrerer Widerstands-/Support-Linien im Chart machen würde."""
+    high = intraday_reihe["High"]
+    low = intraday_reihe["Low"]
+    n = len(intraday_reihe)
+
+    swing_highs, swing_lows = [], []
+    for i in range(fenster, n - fenster):
+        fh = high.iloc[i - fenster:i + fenster + 1]
+        if high.iloc[i] == fh.max():
+            swing_highs.append(high.iloc[i])
+        fl = low.iloc[i - fenster:i + fenster + 1]
+        if low.iloc[i] == fl.min():
+            swing_lows.append(low.iloc[i])
+
+    def clustern(punkte):
+        buckets = {}
+        for p in punkte:
+            key = round(p / bucket_usd) * bucket_usd
+            buckets.setdefault(key, []).append(p)
+        zonen = [(sum(v) / len(v), len(v)) for v in buckets.values() if len(v) >= min_treffer]
+        zonen.sort(key=lambda z: -z[1])
+        return zonen[:top_n]
+
+    return {"widerstandszonen": clustern(swing_highs), "supportzonen": clustern(swing_lows)}
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -434,6 +466,21 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     ax.axhline(intraday_tief, color="#c9c2b0", linewidth=0.9, linestyle=":", alpha=0.7)
     ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
              fontsize=8.5, va="top", ha="left")
+
+    # Umkehrzonen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
+    # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala
+    # nicht erneut aufblähen (die Achse ist an dieser Stelle schon final).
+    umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe)
+    for preis, treffer in umkehrzonen["widerstandszonen"]:
+        if y_unten <= preis <= y_oben:
+            ax.axhline(preis, color="#e8e0c8", linewidth=1.0, linestyle="-", alpha=0.6)
+            ax.text(intraday_reihe.index[0], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#e8e0c8", fontsize=7.5, va="bottom", ha="left")
+    for preis, treffer in umkehrzonen["supportzonen"]:
+        if y_unten <= preis <= y_oben:
+            ax.axhline(preis, color="#e8e0c8", linewidth=1.0, linestyle="-", alpha=0.6)
+            ax.text(intraday_reihe.index[0], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#e8e0c8", fontsize=7.5, va="bottom", ha="left")
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
@@ -631,7 +678,14 @@ def main():
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 6-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
-    kombinierte_zonen_6m = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=15)
+    # Für den 6-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/6-Monats-
+    # Fenstern (nicht 36M) - deren Zonen stammen aus Daten, die ohnehin im sichtbaren
+    # 6-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
+    # Fenster bleibt außen vor, weil es auch Zonen aus einem ganz anderen (viel tieferen)
+    # historischen Kursniveau liefern kann.
+    kombinierte_zonen_6m = kombiniere_zonen(
+        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 6)}
+    )
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday)
     chart_lang_pfad = None
     if daily_6m is not None:
