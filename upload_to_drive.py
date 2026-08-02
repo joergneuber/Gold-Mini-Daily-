@@ -14,6 +14,7 @@ Benötigte Secrets:
 import os
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -35,7 +36,7 @@ def hole_service():
 
 
 def hochladen(pfad, mime_type, ordner_id, service, anzeige_name):
-    zeitstempel = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    zeitstempel = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d_%H-%M")
     dateiname = f"{zeitstempel}_{anzeige_name}"
     metadata = {"name": dateiname, "parents": [ordner_id]}
     media = MediaFileUpload(pfad, mimetype=mime_type)
