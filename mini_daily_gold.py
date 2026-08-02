@@ -242,12 +242,12 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     for r in pivots["r"]:
         if y_unten <= r <= y_oben:
             ax.axhline(r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
-            ax.text(intraday_reihe.index[-1], r, f" {r:,.0f}", color="#e8887a",
+            ax.text(intraday_reihe.index[-1], r, f" Widerstand {r:,.0f}", color="#e8887a",
                      fontsize=9.5, fontweight="bold", va="center", ha="left")
     for s in pivots["s"]:
         if y_unten <= s <= y_oben:
             ax.axhline(s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
-            ax.text(intraday_reihe.index[-1], s, f" {s:,.0f}", color="#9fcf8f",
+            ax.text(intraday_reihe.index[-1], s, f" Support {s:,.0f}", color="#9fcf8f",
                      fontsize=9.5, fontweight="bold", va="center", ha="left")
 
     # Tatsächliches Intraday-Hoch/-Tief zusätzlich als schlichte Referenzlinien -
@@ -275,6 +275,43 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
     ax.set_title("Gold (GC=F) - Intraday", color="#ece6d9", fontsize=13, loc="left")
+    ax.set_ylabel("USD", color="#a89d87", fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(pfad, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return pfad
+
+
+def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
+    """6-Monats-Tageschart mit den bereits berechneten Reaktionszonen als Linien -
+    macht sichtbar, wo die im Rückblick-Text genannten strukturellen Zonen herkommen."""
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
+    fig.patch.set_facecolor("#14110d")
+    ax.set_facecolor("#14110d")
+
+    schluss = daily["Close"]
+    ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
+
+    if zonen:
+        for preis, treffer in zonen["widerstandszonen"]:
+            ax.axhline(preis, color="#b5654f", linewidth=1.0, linestyle="--", alpha=0.8)
+            ax.text(daily.index[-1], preis, f" Widerstand {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#e8887a", fontsize=9, fontweight="bold", va="center", ha="left")
+        for preis, treffer in zonen["supportzonen"]:
+            ax.axhline(preis, color="#7fae6f", linewidth=1.0, linestyle="--", alpha=0.8)
+            ax.text(daily.index[-1], preis, f" Support {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#9fcf8f", fontsize=9, fontweight="bold", va="center", ha="left")
+
+    ax.margins(x=0.10)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.tick_params(colors="#a89d87", labelsize=10)
+    for spine in ax.spines.values():
+        spine.set_color("#3a3226")
+    ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
+    ax.set_title("Gold (GC=F) - 6 Monate, strukturelle Reaktionszonen", color="#ece6d9",
+                 fontsize=13, loc="left")
+    ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
     fig.tight_layout()
     fig.savefig(pfad, facecolor=fig.get_facecolor())
@@ -355,8 +392,11 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Rückblick</h3>
     <p style="line-height:1.6;">{rueckblick_text}</p>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Intraday)</h3>
     <img src="cid:chart" style="max-width:100%;border:1px solid #3a3226;">
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (6 Monate)</h3>
+    <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
     Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: yfinance
@@ -372,8 +412,11 @@ def main():
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
 
     zonen_je_zeitraum = {}
+    daily_6m = None
     for monate in (3, 6, 36):
         langfrist = hole_langfrist_daten(monate=monate)
+        if monate == 6:
+            daily_6m = langfrist
         zonen_je_zeitraum[monate] = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
         if zonen_je_zeitraum[monate]:
             print(f"Widerstandszonen ({monate}M): {zonen_je_zeitraum[monate]['widerstandszonen']}")
@@ -383,6 +426,9 @@ def main():
 
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum)
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots)
+    chart_lang_pfad = None
+    if daily_6m is not None:
+        chart_lang_pfad = baue_langfrist_chart(daily_6m, zonen_je_zeitraum.get(6))
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
 
@@ -394,7 +440,7 @@ def main():
     print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
-    print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png")
+    print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png, chart_langfrist.png")
 
 
 if __name__ == "__main__":
