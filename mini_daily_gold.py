@@ -398,10 +398,12 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     # -Tiefs in 20-Min-Fenstern, min. 2 Berührungen je Seite) - anders als die reine
     # Spannen-Prüfung erkennt das auch Tage mit echtem Pendeln zwischen zwei Levels.
     range_box = finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2)
+    box_bereich = None
     if range_box:
         start_zeit, end_zeit, tief, hoch = range_box
         ueberschneidet_sich = any(tief <= p <= hoch for p in alle_umkehr_preise)
         if ueberschneidet_sich:
+            box_bereich = (tief, hoch)
             x_start = mdates.date2num(start_zeit)
             x_end = mdates.date2num(end_zeit)
             ax.add_patch(Rectangle(
@@ -481,13 +483,19 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     # Umkehrzonen zeichnen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
     # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala nicht
     # erneut aufblähen. Eigene Farbe (Blau) statt Creme, unterscheidbar von der Range-Box.
+    # Zonen INNERHALB einer bereits gezeichneten Range-Box werden übersprungen - die
+    # Box deckt diesen Preisbereich schon ab, eine zusätzliche Linie wäre redundant
+    # und sorgt nur für überlappende Beschriftungen.
+    def in_box(p):
+        return box_bereich is not None and box_bereich[0] <= p <= box_bereich[1]
+
     for preis, treffer in umkehrzonen["widerstandszonen"]:
-        if y_unten <= preis <= y_oben:
+        if y_unten <= preis <= y_oben and not in_box(preis):
             ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
             ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
                      color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
     for preis, treffer in umkehrzonen["supportzonen"]:
-        if y_unten <= preis <= y_oben:
+        if y_unten <= preis <= y_oben and not in_box(preis):
             ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
             ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
                      color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
