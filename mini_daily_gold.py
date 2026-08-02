@@ -157,7 +157,7 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
     zonen_block = "\n".join(zonen_bloecke)
 
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
-Schreibe einen kurzen Rückblick-Absatz (4-6 Sätze, deutsch, sachlich, ohne Anrede,
+Schreibe einen Rückblick-Absatz (genau 6-7 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
 
 Intraday-Daten (kurzfristig):
@@ -176,18 +176,24 @@ sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Piv
 Fenster zeigen eher aktuell relevante Zonen, längere Fenster eher übergeordnete Struktur):
 {zonen_block}
 
-Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken (Nähe zu einem
-Widerstand/einer Unterstützung, mögliche Trigger-Kurse für einen Ausbruch nach oben
-oder eine Trendwende nach unten). Nenne konkrete Kurswerte.
+Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken. Benenne dabei
+EXPLIZIT zwei konkrete Kursszenarien für den Intraday-Horizont:
+1. Aufwärtsszenario: welcher Trigger-Kurs einen Ausbruch nach oben auslösen würde und
+   welches Kursziel/welche Widerstandsmarke danach als nächstes relevant wird
+2. Abwärtsszenario: welcher Trigger-Kurs eine Trendwende/Korrektur nach unten auslösen
+   würde und welches Kursziel/welche Unterstützungsmarke danach als nächstes relevant wird
+Nenne in beiden Szenarien konkrete Kurswerte aus den Daten oben, keine vagen Formulierungen.
 
 Ordne die Kursbewegung anschließend, gestützt auf die Reaktionszonen der verschiedenen
 Zeitfenster (falls vorhanden - bevorzuge dabei das kürzeste Fenster mit brauchbaren
-Zonen nahe am aktuellen Kurs), einer gängigen charttechnischen Formation zu (z.B.
+Zonen nahe am aktuellen Kurs), knapp einer gängigen charttechnischen Formation zu (z.B.
 aufsteigendes/absteigendes/symmetrisches Dreieck, Seitwärtskanal, Doppel-Top,
 Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text. Falls auch über alle
 Zeitfenster hinweg keine seriöse Einschätzung möglich ist, sag das knapp statt zu
 spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
 
+Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahmen von
+6-7 Sätzen - fasse dich pro Punkt knapp statt jeden Aspekt breit auszuführen.
 Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
 
     try:
