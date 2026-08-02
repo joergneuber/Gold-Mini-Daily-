@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
+import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
 
@@ -59,6 +60,52 @@ def hole_kursdaten():
     }
 
 
+def hole_langfrist_daten(monate=36):
+    """Tageskurse der letzten `monate` Monate für die Reaktionszonen-Analyse
+    (separat von den Intraday-Daten, die für Pivots/Chart genutzt werden).
+    yfinance kennt keinen festen period-Code für beliebige Monatszahlen,
+    daher wird das Startdatum explizit berechnet."""
+    ticker = yf.Ticker(TICKER)
+    start = (pd.Timestamp.now() - pd.DateOffset(months=monate)).strftime("%Y-%m-%d")
+    daily = ticker.history(start=start, interval="1d")
+    if len(daily) < 60:
+        return None
+    return daily
+
+
+def analysiere_reaktionszonen(daily, fenster=5, bucket_usd=15, min_treffer=2, top_n=4):
+    """Findet lokale Swing-Hochs/-Tiefs (Punkt ist Extremum in einem Fenster von
+    +/- `fenster` Handelstagen) und gruppiert sie in Preis-Buckets. Nur Zonen mit
+    mindestens `min_treffer` Reaktionen gelten als strukturell relevant - eine
+    einzelne Berührung ist noch keine Zone, sondern Zufall."""
+    highs = daily["High"].values
+    lows = daily["Low"].values
+    n = len(daily)
+
+    swing_highs, swing_lows = [], []
+    for i in range(fenster, n - fenster):
+        fenster_h = highs[i - fenster:i + fenster + 1]
+        if highs[i] == fenster_h.max():
+            swing_highs.append(highs[i])
+        fenster_l = lows[i - fenster:i + fenster + 1]
+        if lows[i] == fenster_l.min():
+            swing_lows.append(lows[i])
+
+    def clustern(punkte):
+        buckets = {}
+        for p in punkte:
+            key = round(p / bucket_usd) * bucket_usd
+            buckets.setdefault(key, []).append(p)
+        zonen = [(np.mean(v), len(v)) for v in buckets.values() if len(v) >= min_treffer]
+        zonen.sort(key=lambda z: -z[1])
+        return zonen[:top_n]
+
+    return {
+        "widerstandszonen": clustern(swing_highs),
+        "supportzonen": clustern(swing_lows),
+    }
+
+
 def klassische_pivots(high, low, close):
     p = (high + low + close) / 3
     r1 = 2 * p - low
@@ -79,7 +126,7 @@ def bestimme_tendenz(realtime, prev_close):
     return "Seitwärts", pct
 
 
-def generiere_rueckblick(daten, pivots, tendenz):
+def generiere_rueckblick(daten, pivots, tendenz, reaktionszonen, zonen_monate=36):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -88,11 +135,31 @@ def generiere_rueckblick(daten, pivots, tendenz):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-flash-latest")
 
+    if reaktionszonen and (reaktionszonen["widerstandszonen"] or reaktionszonen["supportzonen"]):
+        w_zeilen = "\n".join(
+            f"- ca. {preis:,.0f} USD ({treffer}x als Hoch bestätigt in den letzten {zonen_monate} Monaten)"
+            for preis, treffer in reaktionszonen["widerstandszonen"]
+        ).replace(",", ".")
+        s_zeilen = "\n".join(
+            f"- ca. {preis:,.0f} USD ({treffer}x als Tief bestätigt in den letzten {zonen_monate} Monaten)"
+            for preis, treffer in reaktionszonen["supportzonen"]
+        ).replace(",", ".")
+        zonen_block = f"""
+Strukturelle Reaktionszonen ({zonen_monate}-Monats-Historie, mehrfach bestätigte Hoch-/Tiefpunkte -
+diese sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Pivots):
+Widerstandszonen:
+{w_zeilen if w_zeilen else '(keine mit mind. 2 Bestätigungen gefunden)'}
+Supportzonen:
+{s_zeilen if s_zeilen else '(keine mit mind. 2 Bestätigungen gefunden)'}
+"""
+    else:
+        zonen_block = f"\n(Keine {zonen_monate}-Monats-Reaktionszonen verfügbar für diesen Lauf.)\n"
+
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
 Schreibe einen kurzen Rückblick-Absatz (4-6 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
 
-Daten:
+Intraday-Daten (kurzfristig):
 - Realtime-Kurs: {daten['realtime']:.2f} USD
 - Schlusskurs Vortag: {daten['prev_close']:.2f} USD
 - Vortages-Hoch: {daten['prev_high']:.2f} USD
@@ -100,18 +167,19 @@ Daten:
 - Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
 - Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
 - Vorbörsliche Tendenz: {tendenz}
-- Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
-- Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
+- Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
+- Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
+{zonen_block}
+Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken (Nähe zu einem
+Widerstand/einer Unterstützung, mögliche Trigger-Kurse für einen Ausbruch nach oben
+oder eine Trendwende nach unten). Nenne konkrete Kurswerte.
 
-Beschreibe zuerst die aktuelle Lage relativ zu diesen Marken (Nähe zu einem Widerstand/
-einer Unterstützung, mögliche Trigger-Kurse für einen Ausbruch nach oben oder eine
-Trendwende nach unten). Nenne konkrete Kurswerte aus den Daten oben.
-
-Ordne die Kursbewegung außerdem, soweit anhand der Werte erkennbar, einer gängigen
-charttechnischen Formation zu (z.B. aufsteigendes/absteigendes/symmetrisches Dreieck,
-Seitwärtskanal, Doppel-Top, Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text.
-Falls die Datenlage für eine seriöse Formations-Einschätzung nicht ausreicht, sag das
-knapp statt zu spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
+Ordne die Kursbewegung anschließend, gestützt auf die {zonen_monate}-Monats-Reaktionszonen (falls
+vorhanden), einer gängigen charttechnischen Formation zu (z.B. aufsteigendes/absteigendes/
+symmetrisches Dreieck, Seitwärtskanal, Doppel-Top, Doppel-Boden, Flagge, Keil) und benenne
+sie explizit im Text. Falls auch die {zonen_monate}-Monats-Zonen für eine seriöse Einschätzung nicht
+ausreichen, sag das knapp statt zu spekulieren - keine erfundene Formation nennen, nur
+um etwas zu benennen.
 
 Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
 
@@ -289,7 +357,14 @@ def main():
     daten = hole_kursdaten()
     pivots = klassische_pivots(daten["prev_high"], daten["prev_low"], daten["prev_close"])
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
-    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label)
+
+    langfrist = hole_langfrist_daten(monate=36)
+    reaktionszonen = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
+    if reaktionszonen:
+        print(f"Widerstandszonen (36M): {reaktionszonen['widerstandszonen']}")
+        print(f"Supportzonen (36M): {reaktionszonen['supportzonen']}")
+
+    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, reaktionszonen, zonen_monate=36)
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots)
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
