@@ -264,17 +264,33 @@ Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
         return f"(Rückblick-Generierung fehlgeschlagen: {exc})"
 
 
-def finde_konsolidierungszonen(preisreihe, fenster, schwelle_pct, min_laenge, max_zonen=2):
+def finde_konsolidierungszonen(preisreihe, fenster, schwelle_pct, min_laenge, max_zonen=2,
+                                 gesamt_schwelle_faktor=1.3):
     """Findet Phasen mit geringer Preisspanne (Seitwärtsbewegung) per Rolling-Fenster.
     Ein Punkt gilt als 'seitwärts', wenn die Spanne (Hoch-Tief) der letzten `fenster`
     Werte weniger als `schwelle_pct` Prozent des Preises beträgt. Zusammenhängende
     seitwärts-Phasen mit mindestens `min_laenge` Punkten werden zu einer Zone
-    zusammengefasst. Gibt die `max_zonen` jüngsten Zonen zurück (Liste von
-    (start_zeit, end_zeit, tief, hoch))."""
+    zusammengefasst - ABER nur, wenn auch die Gesamtspanne der ganzen Zone unter
+    schwelle_pct * gesamt_schwelle_faktor bleibt. Diese zweite Prüfung ist nötig,
+    weil ein langsamer, gerichteter Trend aus vielen kleinen Ein-Stunden-Bewegungen
+    bestehen kann, die jede für sich unter der Schwelle liegen, obwohl die Summe
+    über die ganze Phase klar richtungsweisend ist - kein echtes Seitwärtspendeln.
+    Gibt die `max_zonen` jüngsten Zonen zurück (Liste von (start_zeit, end_zeit,
+    tief, hoch))."""
     rolling_max = preisreihe.rolling(fenster).max()
     rolling_min = preisreihe.rolling(fenster).min()
     spanne_pct = (rolling_max - rolling_min) / preisreihe * 100
     ist_seitwaerts = spanne_pct <= schwelle_pct
+
+    def pruefe_und_haenge_an(start, ende, zonen):
+        if ende - start + 1 < min_laenge:
+            return
+        seg_start = max(0, start - fenster + 1)
+        segment = preisreihe.iloc[seg_start:ende + 1]
+        tief, hoch = segment.min(), segment.max()
+        gesamt_spanne_pct = (hoch - tief) / segment.mean() * 100
+        if gesamt_spanne_pct <= schwelle_pct * gesamt_schwelle_faktor:
+            zonen.append((segment.index[0], segment.index[-1], tief, hoch))
 
     zonen = []
     start = None
@@ -283,18 +299,10 @@ def finde_konsolidierungszonen(preisreihe, fenster, schwelle_pct, min_laenge, ma
         if flag and start is None:
             start = i
         elif not flag and start is not None:
-            ende = i - 1
-            if ende - start + 1 >= min_laenge:
-                seg_start = max(0, start - fenster + 1)
-                segment = preisreihe.iloc[seg_start:ende + 1]
-                zonen.append((segment.index[0], segment.index[-1], segment.min(), segment.max()))
+            pruefe_und_haenge_an(start, i - 1, zonen)
             start = None
     if start is not None:
-        ende = len(werte) - 1
-        if ende - start + 1 >= min_laenge:
-            seg_start = max(0, start - fenster + 1)
-            segment = preisreihe.iloc[seg_start:ende + 1]
-            zonen.append((segment.index[0], segment.index[-1], segment.min(), segment.max()))
+        pruefe_und_haenge_an(start, len(werte) - 1, zonen)
 
     return zonen[-max_zonen:]
 
