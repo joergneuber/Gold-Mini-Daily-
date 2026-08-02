@@ -37,6 +37,8 @@ def main():
 
     with open("chart.png", "rb") as img:
         msg.get_payload()[1].add_related(img.read(), maintype="image", subtype="png", cid="chart")
+    with open("chart_langfrist.png", "rb") as img:
+        msg.get_payload()[1].add_related(img.read(), maintype="image", subtype="png", cid="chart_lang")
 
     # Klartext zusätzlich als Anhang, falls der Mail-Client trotzdem nur HTML anzeigt
     zeitstempel = jetzt_berlin.strftime("%Y-%m-%d_%H-%M")
