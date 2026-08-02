@@ -127,7 +127,7 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
     x_num = mdates.date2num(trend_ausschnitt.index)
     steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
     trend_werte = steigung * x_num + achsenabschnitt
-    trend_farbe = "#6fa8dc" if steigung > 0 else "#e69138"
+    trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
     trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
     ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8,
              linestyle="-", alpha=0.9, zorder=5)
@@ -159,6 +159,17 @@ def baue_chart(intraday_reihe, pivots, pfad="chart.png"):
             ax.axhline(s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
             ax.text(intraday_reihe.index[-1], s, f" {s:,.0f}", color="#9fcf8f",
                      fontsize=9.5, fontweight="bold", va="center", ha="left")
+
+    # Tatsächliches Intraday-Hoch/-Tief zusätzlich als schlichte Referenzlinien -
+    # ergänzt die rechnerischen Pivot-Level um die real erreichten Extrempunkte.
+    intraday_hoch = preise.max()
+    intraday_tief = preise.min()
+    ax.axhline(intraday_hoch, color="#c9c2b0", linewidth=0.9, linestyle=":", alpha=0.7)
+    ax.text(intraday_reihe.index[0], intraday_hoch, "Tageshoch  ", color="#c9c2b0",
+             fontsize=8.5, va="bottom", ha="left")
+    ax.axhline(intraday_tief, color="#c9c2b0", linewidth=0.9, linestyle=":", alpha=0.7)
+    ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
+             fontsize=8.5, va="top", ha="left")
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
