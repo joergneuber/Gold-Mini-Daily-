@@ -1,4 +1,5 @@
 yfinance
+pandas
 matplotlib
 google-generativeai
 google-api-python-client
