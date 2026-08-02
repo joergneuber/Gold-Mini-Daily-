@@ -305,7 +305,9 @@ def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
         return None
 
     start = min(r_cluster[0], s_cluster[0])
-    ende = max(r_cluster[1], s_cluster[1])
+    # Bis zum aktuellsten Kurspunkt verlängern, nicht nur bis zur letzten Berührung -
+    # die Range gilt als weiterhin gültig, solange der Kurs sie nicht verlassen hat.
+    ende = intraday_reihe.index[-1]
     return start, ende, s_cluster[2], r_cluster[2]
 
 
@@ -450,6 +452,20 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
              linestyle="-", alpha=0.9, zorder=5)
     ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom", ha="left")
+
+    # Range-Box: gleiche Berührungs-basierte Erkennung wie im Intraday-Chart, aber mit
+    # auf Tagesdaten abgestimmten Parametern (5 Handelstage Fenster, gröberer Bucket).
+    range_box = finde_range_box(daily, fenster=5, bucket_usd=30, min_treffer=2)
+    if range_box:
+        start_zeit, end_zeit, tief, hoch = range_box
+        x_start = mdates.date2num(start_zeit)
+        x_end = mdates.date2num(end_zeit)
+        ax.add_patch(Rectangle(
+            (x_start, tief), x_end - x_start, hoch - tief,
+            linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
+        ))
+        ax.text(end_zeit, hoch, " Range", color="#e8e0c8", fontsize=8.5,
+                 style="italic", va="bottom", ha="left")
 
     if zonen:
         for preis, treffer, fenster in zonen["widerstandszonen"]:
