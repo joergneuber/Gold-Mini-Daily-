@@ -385,20 +385,31 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
 
+    # Umkehrzonen vorab berechnen (wird weiter unten auch fürs Zeichnen genutzt), damit
+    # die Range-Box nur gezeigt wird, wenn sie sich mit einer Umkehrzone deckt - sonst
+    # zeigen beide fast dieselbe Information doppelt und übereinander im Bild.
+    umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe, top_n=2)
+    alle_umkehr_preise = (
+        [p for p, _ in umkehrzonen["widerstandszonen"]]
+        + [p for p, _ in umkehrzonen["supportzonen"]]
+    )
+
     # Range-Box: Widerstand + Support, die beide mehrfach berührt wurden (Swing-Hochs/
     # -Tiefs in 20-Min-Fenstern, min. 2 Berührungen je Seite) - anders als die reine
     # Spannen-Prüfung erkennt das auch Tage mit echtem Pendeln zwischen zwei Levels.
     range_box = finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2)
     if range_box:
         start_zeit, end_zeit, tief, hoch = range_box
-        x_start = mdates.date2num(start_zeit)
-        x_end = mdates.date2num(end_zeit)
-        ax.add_patch(Rectangle(
-            (x_start, tief), x_end - x_start, hoch - tief,
-            linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
-        ))
-        ax.text(start_zeit, hoch, "Range  ", color="#e8e0c8", fontsize=8.5,
-                 style="italic", va="bottom", ha="right")
+        ueberschneidet_sich = any(tief <= p <= hoch for p in alle_umkehr_preise)
+        if ueberschneidet_sich:
+            x_start = mdates.date2num(start_zeit)
+            x_end = mdates.date2num(end_zeit)
+            ax.add_patch(Rectangle(
+                (x_start, tief), x_end - x_start, hoch - tief,
+                linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
+            ))
+            ax.text(start_zeit, hoch, "Range  ", color="#e8e0c8", fontsize=8.5,
+                     style="italic", va="bottom", ha="right")
 
     # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
@@ -467,11 +478,9 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
              fontsize=8.5, va="top", ha="left")
 
-    # Umkehrzonen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
-    # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala
-    # nicht erneut aufblähen (die Achse ist an dieser Stelle schon final). Eigene
-    # Farbe (Blau) statt Creme, damit sie sich klar von der Range-Box unterscheiden.
-    umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe, top_n=2)
+    # Umkehrzonen zeichnen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
+    # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala nicht
+    # erneut aufblähen. Eigene Farbe (Blau) statt Creme, unterscheidbar von der Range-Box.
     for preis, treffer in umkehrzonen["widerstandszonen"]:
         if y_unten <= preis <= y_oben:
             ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
