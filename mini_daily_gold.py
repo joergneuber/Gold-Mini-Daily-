@@ -89,7 +89,7 @@ def generiere_rueckblick(daten, pivots, tendenz):
     model = genai.GenerativeModel("gemini-flash-latest")
 
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
-Schreibe einen kurzen Rückblick-Absatz (3-5 Sätze, deutsch, sachlich, ohne Anrede,
+Schreibe einen kurzen Rückblick-Absatz (4-6 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
 
 Daten:
@@ -97,14 +97,23 @@ Daten:
 - Schlusskurs Vortag: {daten['prev_close']:.2f} USD
 - Vortages-Hoch: {daten['prev_high']:.2f} USD
 - Vortages-Tief: {daten['prev_low']:.2f} USD
+- Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
+- Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
 - Vorbörsliche Tendenz: {tendenz}
 - Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
-Beschreibe die aktuelle Lage relativ zu diesen Marken (Nähe zu einem Widerstand/einer
-Unterstützung, mögliche Trigger-Kurse für einen Ausbruch nach oben oder eine Trendwende
-nach unten). Nenne konkrete Kurswerte aus den Daten oben. Keine Übertreibungen, keine
-Prognosen mit Sicherheit formuliert."""
+Beschreibe zuerst die aktuelle Lage relativ zu diesen Marken (Nähe zu einem Widerstand/
+einer Unterstützung, mögliche Trigger-Kurse für einen Ausbruch nach oben oder eine
+Trendwende nach unten). Nenne konkrete Kurswerte aus den Daten oben.
+
+Ordne die Kursbewegung außerdem, soweit anhand der Werte erkennbar, einer gängigen
+charttechnischen Formation zu (z.B. aufsteigendes/absteigendes/symmetrisches Dreieck,
+Seitwärtskanal, Doppel-Top, Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text.
+Falls die Datenlage für eine seriöse Formations-Einschätzung nicht ausreicht, sag das
+knapp statt zu spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
+
+Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
 
     try:
         antwort = model.generate_content(prompt)
