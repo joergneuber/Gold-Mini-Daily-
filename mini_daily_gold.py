@@ -264,47 +264,49 @@ Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
         return f"(Rückblick-Generierung fehlgeschlagen: {exc})"
 
 
-def finde_konsolidierungszonen(preisreihe, fenster, schwelle_pct, min_laenge, max_zonen=2,
-                                 gesamt_schwelle_faktor=1.3):
-    """Findet Phasen mit geringer Preisspanne (Seitwärtsbewegung) per Rolling-Fenster.
-    Ein Punkt gilt als 'seitwärts', wenn die Spanne (Hoch-Tief) der letzten `fenster`
-    Werte weniger als `schwelle_pct` Prozent des Preises beträgt. Zusammenhängende
-    seitwärts-Phasen mit mindestens `min_laenge` Punkten werden zu einer Zone
-    zusammengefasst - ABER nur, wenn auch die Gesamtspanne der ganzen Zone unter
-    schwelle_pct * gesamt_schwelle_faktor bleibt. Diese zweite Prüfung ist nötig,
-    weil ein langsamer, gerichteter Trend aus vielen kleinen Ein-Stunden-Bewegungen
-    bestehen kann, die jede für sich unter der Schwelle liegen, obwohl die Summe
-    über die ganze Phase klar richtungsweisend ist - kein echtes Seitwärtspendeln.
-    Gibt die `max_zonen` jüngsten Zonen zurück (Liste von (start_zeit, end_zeit,
-    tief, hoch))."""
-    rolling_max = preisreihe.rolling(fenster).max()
-    rolling_min = preisreihe.rolling(fenster).min()
-    spanne_pct = (rolling_max - rolling_min) / preisreihe * 100
-    ist_seitwaerts = spanne_pct <= schwelle_pct
+def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
+    """Findet eine horizontale Range: ein Widerstands- und ein Support-Level, die
+    beide im Tagesverlauf mehrfach berührt wurden (Swing-Hochs/-Tiefs, analog zur
+    Reaktionszonen-Erkennung, aber auf die Intraday-Kerzen angewendet statt auf
+    Tagesdaten). Es geht dabei nicht um 'insgesamt wenig Bewegung', sondern um
+    wiederholte Berührungen derselben beiden Ebenen - ein echtes Pendeln zwischen
+    oben und unten.
+    Gibt (start_zeit, end_zeit, tief, hoch) zurück oder None."""
+    high = intraday_reihe["High"]
+    low = intraday_reihe["Low"]
+    n = len(intraday_reihe)
 
-    def pruefe_und_haenge_an(start, ende, zonen):
-        if ende - start + 1 < min_laenge:
-            return
-        seg_start = max(0, start - fenster + 1)
-        segment = preisreihe.iloc[seg_start:ende + 1]
-        tief, hoch = segment.min(), segment.max()
-        gesamt_spanne_pct = (hoch - tief) / segment.mean() * 100
-        if gesamt_spanne_pct <= schwelle_pct * gesamt_schwelle_faktor:
-            zonen.append((segment.index[0], segment.index[-1], tief, hoch))
+    swing_highs, swing_lows = [], []
+    for i in range(fenster, n - fenster):
+        fh = high.iloc[i - fenster:i + fenster + 1]
+        if high.iloc[i] == fh.max():
+            swing_highs.append((high.index[i], high.iloc[i]))
+        fl = low.iloc[i - fenster:i + fenster + 1]
+        if low.iloc[i] == fl.min():
+            swing_lows.append((low.index[i], low.iloc[i]))
 
-    zonen = []
-    start = None
-    werte = ist_seitwaerts.values
-    for i, flag in enumerate(werte):
-        if flag and start is None:
-            start = i
-        elif not flag and start is not None:
-            pruefe_und_haenge_an(start, i - 1, zonen)
-            start = None
-    if start is not None:
-        pruefe_und_haenge_an(start, len(werte) - 1, zonen)
+    def groesstes_cluster(punkte):
+        buckets = {}
+        for zeit, preis in punkte:
+            key = round(preis / bucket_usd) * bucket_usd
+            buckets.setdefault(key, []).append((zeit, preis))
+        if not buckets:
+            return None
+        bestes = max(buckets.values(), key=len)
+        if len(bestes) < min_treffer:
+            return None
+        zeiten = [z for z, _ in bestes]
+        preise = [p for _, p in bestes]
+        return min(zeiten), max(zeiten), sum(preise) / len(preise)
 
-    return zonen[-max_zonen:]
+    r_cluster = groesstes_cluster(swing_highs)
+    s_cluster = groesstes_cluster(swing_lows)
+    if not r_cluster or not s_cluster:
+        return None
+
+    start = min(r_cluster[0], s_cluster[0])
+    ende = max(r_cluster[1], s_cluster[1])
+    return start, ende, s_cluster[2], r_cluster[2]
 
 
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
@@ -328,17 +330,19 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
 
-    # Konsolidierungszonen: automatisch erkannte Seitwärtsphasen (Rolling-Fenster von
-    # 1h bei 5-Min-Kerzen, Spanne < 1,0% gilt als seitwärts) statt einer festen Zeithälfte.
-    kons_zonen = finde_konsolidierungszonen(preise, fenster=12, schwelle_pct=1.0, min_laenge=12)
-    for start_zeit, end_zeit, tief, hoch in kons_zonen:
+    # Range-Box: Widerstand + Support, die beide mehrfach berührt wurden (Swing-Hochs/
+    # -Tiefs in 20-Min-Fenstern, min. 2 Berührungen je Seite) - anders als die reine
+    # Spannen-Prüfung erkennt das auch Tage mit echtem Pendeln zwischen zwei Levels.
+    range_box = finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2)
+    if range_box:
+        start_zeit, end_zeit, tief, hoch = range_box
         x_start = mdates.date2num(start_zeit)
         x_end = mdates.date2num(end_zeit)
         ax.add_patch(Rectangle(
             (x_start, tief), x_end - x_start, hoch - tief,
             linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
         ))
-        ax.text(end_zeit, hoch, " Konsolidierung", color="#e8e0c8", fontsize=8.5,
+        ax.text(end_zeit, hoch, " Range", color="#e8e0c8", fontsize=8.5,
                  style="italic", va="bottom", ha="left")
 
     # Basis-Range: Kursbereich + Puffer
@@ -446,19 +450,6 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
              linestyle="-", alpha=0.9, zorder=5)
     ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom", ha="left")
-
-    # Konsolidierungszonen: gleiche Erkennung wie im Intraday-Chart, aber mit auf
-    # Tagesdaten abgestimmten Parametern (10 Handelstage Fenster, Spanne < 3,0%).
-    kons_zonen = finde_konsolidierungszonen(schluss, fenster=10, schwelle_pct=3.0, min_laenge=10)
-    for start_zeit, end_zeit, tief, hoch in kons_zonen:
-        x_start = mdates.date2num(start_zeit)
-        x_end = mdates.date2num(end_zeit)
-        ax.add_patch(Rectangle(
-            (x_start, tief), x_end - x_start, hoch - tief,
-            linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
-        ))
-        ax.text(end_zeit, hoch, " Konsolidierung", color="#e8e0c8", fontsize=8.5,
-                 style="italic", va="bottom", ha="left")
 
     if zonen:
         for preis, treffer, fenster in zonen["widerstandszonen"]:
