@@ -311,6 +311,27 @@ def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
     return start, ende, s_cluster[2], r_cluster[2]
 
 
+def finde_range_boxen(preisreihe, fenster=5, bucket_usd=30, min_treffer=2, segmente=3):
+    """Wie finde_range_box, aber für längere Zeiträume (z.B. 6 Monate) gedacht, in
+    denen es mehrere zeitlich getrennte Ranges auf unterschiedlichen Kursniveaus
+    geben kann (z.B. bei einem übergeordneten Trend, der durch mehrere Konsolidierungs-
+    Phasen unterbrochen wird). Teilt den Zeitraum in `segmente` gleich große,
+    chronologische Abschnitte und sucht in jedem Abschnitt separat nach einer Range.
+    Gibt eine Liste von (start_zeit, end_zeit, tief, hoch) zurück, maximal
+    `segmente` Einträge."""
+    n = len(preisreihe)
+    grenzen = np.linspace(0, n, segmente + 1).astype(int)
+    boxen = []
+    for i in range(segmente):
+        teil = preisreihe.iloc[grenzen[i]:grenzen[i + 1]]
+        if len(teil) < 2 * fenster + min_treffer:
+            continue
+        box = finde_range_box(teil, fenster=fenster, bucket_usd=bucket_usd, min_treffer=min_treffer)
+        if box:
+            boxen.append(box)
+    return boxen
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -352,50 +373,56 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     y_unten = preise.min() - puffer
     y_oben = preise.max() + puffer
 
-    # Die jeweils nächstgelegene Widerstands-/Unterstützungslinie IMMER mit einbeziehen,
-    # auch wenn sie knapp außerhalb des reinen Kursbereichs liegt - sonst fehlt oft
-    # jede Orientierung nach oben oder unten.
-    r_oberhalb = [r for r in pivots["r"] if r > y_oben]
-    if r_oberhalb:
-        y_oben = max(y_oben, min(r_oberhalb) * 1.002)
-    s_unterhalb = [s for s in pivots["s"] if s < y_unten]
-    if s_unterhalb:
-        y_unten = min(y_unten, max(s_unterhalb) * 0.998)
-
-    # Zusätzlich das nächstgelegene übergeordnete Struktur-Level (aus den 3/6/36-Monats-
-    # Reaktionszonen) mit einbeziehen, falls eines nah genug ist, um noch relevant zu sein.
-    struktur_r_nahe = struktur_s_nahe = None
+    # Nur die EINE wirklich nächstgelegene Marke pro Richtung zieht die Achse (egal ob
+    # Pivot oder übergeordnetes Struktur-Level) - vorher zogen beide unabhängig
+    # voneinander, wodurch eine weit entfernte Struktur-Zone versehentlich auch alle
+    # dazwischenliegenden Pivot-Level mit ins Bild zog und die Skala unnötig aufblähte.
+    r_kandidaten = [("pivot", r) for r in pivots["r"] if r > y_oben]
+    s_kandidaten = [("pivot", s) for s in pivots["s"] if s < y_unten]
     if strukturzonen:
-        struktur_r_oben = [p for p, *_ in strukturzonen["widerstandszonen"] if p > y_oben]
-        if struktur_r_oben:
-            struktur_r_nahe = min(struktur_r_oben)
-            y_oben = max(y_oben, struktur_r_nahe * 1.002)
-        struktur_s_unten = [p for p, *_ in strukturzonen["supportzonen"] if p < y_unten]
-        if struktur_s_unten:
-            struktur_s_nahe = max(struktur_s_unten)
-            y_unten = min(y_unten, struktur_s_nahe * 0.998)
+        r_kandidaten += [("struktur", p) for p, *_ in strukturzonen["widerstandszonen"] if p > y_oben]
+        s_kandidaten += [("struktur", p) for p, *_ in strukturzonen["supportzonen"] if p < y_unten]
 
+    naechster_r_typ = naechster_r = None
+    if r_kandidaten:
+        naechster_r_typ, naechster_r = min(r_kandidaten, key=lambda kv: kv[1])
+        y_oben = max(y_oben, naechster_r * 1.002)
+    naechster_s_typ = naechster_s = None
+    if s_kandidaten:
+        naechster_s_typ, naechster_s = max(s_kandidaten, key=lambda kv: kv[1])
+        y_unten = min(y_unten, naechster_s * 0.998)
+
+    if naechster_r_typ == "pivot":
+        ax.axhline(naechster_r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
+        ax.text(intraday_reihe.index[-1], naechster_r, f" Widerstand {naechster_r:,.0f}", color="#e8887a",
+                 fontsize=9.5, fontweight="bold", va="center", ha="left")
+    elif naechster_r_typ == "struktur":
+        ax.axhline(naechster_r, color="#b5654f", linewidth=1.3, linestyle=":", alpha=0.6)
+        ax.text(intraday_reihe.index[-1], naechster_r, f" Struktur-Widerstand {naechster_r:,.0f}",
+                 color="#e8887a", fontsize=8.5, style="italic", va="center", ha="left")
+
+    if naechster_s_typ == "pivot":
+        ax.axhline(naechster_s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
+        ax.text(intraday_reihe.index[-1], naechster_s, f" Support {naechster_s:,.0f}", color="#9fcf8f",
+                 fontsize=9.5, fontweight="bold", va="center", ha="left")
+    elif naechster_s_typ == "struktur":
+        ax.axhline(naechster_s, color="#7fae6f", linewidth=1.3, linestyle=":", alpha=0.6)
+        ax.text(intraday_reihe.index[-1], naechster_s, f" Struktur-Support {naechster_s:,.0f}",
+                 color="#9fcf8f", fontsize=8.5, style="italic", va="center", ha="left")
+
+    # Pivot- und Struktur-Level, die zufällig auch noch in die (dadurch minimal
+    # erweiterte) Achse passen, zusätzlich einzeichnen - aber nichts zieht die
+    # Achse weiter auf als die eine oben ermittelte nächste Marke je Richtung.
     for r in pivots["r"]:
-        if y_unten <= r <= y_oben:
+        if r != naechster_r and y_unten <= r <= y_oben:
             ax.axhline(r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
             ax.text(intraday_reihe.index[-1], r, f" Widerstand {r:,.0f}", color="#e8887a",
                      fontsize=9.5, fontweight="bold", va="center", ha="left")
     for s in pivots["s"]:
-        if y_unten <= s <= y_oben:
+        if s != naechster_s and y_unten <= s <= y_oben:
             ax.axhline(s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
             ax.text(intraday_reihe.index[-1], s, f" Support {s:,.0f}", color="#9fcf8f",
                      fontsize=9.5, fontweight="bold", va="center", ha="left")
-
-    # Übergeordnete Struktur-Level: gepunktet statt gestrichelt, damit klar erkennbar
-    # ist, dass sie aus der längerfristigen Historie stammen (nicht Intraday-Pivots).
-    if struktur_r_nahe is not None:
-        ax.axhline(struktur_r_nahe, color="#b5654f", linewidth=1.3, linestyle=":", alpha=0.6)
-        ax.text(intraday_reihe.index[-1], struktur_r_nahe, f" Struktur-Widerstand {struktur_r_nahe:,.0f}",
-                 color="#e8887a", fontsize=8.5, style="italic", va="center", ha="left")
-    if struktur_s_nahe is not None:
-        ax.axhline(struktur_s_nahe, color="#7fae6f", linewidth=1.3, linestyle=":", alpha=0.6)
-        ax.text(intraday_reihe.index[-1], struktur_s_nahe, f" Struktur-Support {struktur_s_nahe:,.0f}",
-                 color="#9fcf8f", fontsize=8.5, style="italic", va="center", ha="left")
 
     # Tatsächliches Intraday-Hoch/-Tief zusätzlich als schlichte Referenzlinien -
     # ergänzt die rechnerischen Pivot-Level um die real erreichten Extrempunkte.
@@ -453,11 +480,11 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom", ha="left")
 
-    # Range-Box: gleiche Berührungs-basierte Erkennung wie im Intraday-Chart, aber mit
-    # auf Tagesdaten abgestimmten Parametern (5 Handelstage Fenster, gröberer Bucket).
-    range_box = finde_range_box(daily, fenster=5, bucket_usd=30, min_treffer=2)
-    if range_box:
-        start_zeit, end_zeit, tief, hoch = range_box
+    # Range-Boxen: gleiche Berührungs-basierte Erkennung wie im Intraday-Chart, aber
+    # in 3 zeitliche Abschnitte segmentiert - über 6 Monate kann es mehrere getrennte
+    # Ranges auf unterschiedlichen Kursniveaus geben, nicht nur eine einzige.
+    range_boxen = finde_range_boxen(daily, fenster=5, bucket_usd=30, min_treffer=2, segmente=3)
+    for start_zeit, end_zeit, tief, hoch in range_boxen:
         x_start = mdates.date2num(start_zeit)
         x_end = mdates.date2num(end_zeit)
         ax.add_patch(Rectangle(
