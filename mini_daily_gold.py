@@ -164,6 +164,23 @@ def bestimme_tendenz(realtime, prev_close):
     return "Seitwärts", pct
 
 
+def hole_saisonalitaet_text():
+    """Rein kalenderbasierter Saisonalitäts-Kontext für Gold (Quelle: RealMoneyTrader
+    Research, 43 Jahre Historie). Kein API-Aufruf, kein Signal/Qualitäts-Modifikator -
+    nur zusätzlicher Kontext für den Rückblick-Text, analog zum Sektor-Analyse-Projekt."""
+    heute = datetime.now(ZoneInfo("Europe/Berlin"))
+    monat, tag = heute.month, heute.day
+
+    if 5 <= monat <= 8:
+        return ("Saisonal befindet sich Gold aktuell in der historisch long-geneigten Phase "
+                "Mai bis August (43 Jahre Historie, RealMoneyTrader Research).")
+    if (monat == 12 and tag >= 15) or (monat == 1 and tag <= 15):
+        return ("Saisonal befindet sich Gold aktuell in der historisch long-geneigten Phase "
+                "rund um den Jahreswechsel, Mitte Dezember bis Mitte Januar (43 Jahre Historie, "
+                "RealMoneyTrader Research).")
+    return None
+
+
 def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
     zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}."""
@@ -194,6 +211,9 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
         )
     zonen_block = "\n".join(zonen_bloecke)
 
+    saisonalitaet = hole_saisonalitaet_text()
+    saison_block = f"\nSaisonaler Kontext (nur Hintergrundinfo, kein Signal): {saisonalitaet}\n" if saisonalitaet else ""
+
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
 Schreibe einen Rückblick-Absatz (genau 6-7 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
@@ -208,7 +228,7 @@ Intraday-Daten (kurzfristig):
 - Vorbörsliche Tendenz: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
-
+{saison_block}
 Strukturelle Reaktionszonen (mehrfach bestätigte Hoch-/Tiefpunkte je Zeitfenster - diese
 sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Pivots; kürzere
 Fenster zeigen eher aktuell relevante Zonen, längere Fenster eher übergeordnete Struktur):
@@ -226,7 +246,9 @@ Ordne die Kursbewegung anschließend, gestützt auf die Reaktionszonen der versc
 Zeitfenster (falls vorhanden - bevorzuge dabei das kürzeste Fenster mit brauchbaren
 Zonen nahe am aktuellen Kurs), knapp einer gängigen charttechnischen Formation zu (z.B.
 aufsteigendes/absteigendes/symmetrisches Dreieck, Seitwärtskanal, Doppel-Top,
-Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text. Falls auch über alle
+Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text. Falls vorhanden, kannst du
+den saisonalen Kontext knapp als zusätzliche Einordnung erwähnen - er ersetzt aber nicht
+die charttechnische Analyse und ist kein eigenständiges Signal. Falls auch über alle
 Zeitfenster hinweg keine seriöse Einschätzung möglich ist, sag das knapp statt zu
 spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
 
@@ -502,11 +524,14 @@ def main():
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum)
-    kombinierte_zonen = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"])
-    chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen)
+    # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
+    # Struktur-Level zeigen (enger Zeithorizont), der 6-Monats-Chart darf großzügiger sein.
+    kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
+    kombinierte_zonen_6m = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=15)
+    chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday)
     chart_lang_pfad = None
     if daily_6m is not None:
-        chart_lang_pfad = baue_langfrist_chart(daily_6m, kombinierte_zonen)
+        chart_lang_pfad = baue_langfrist_chart(daily_6m, kombinierte_zonen_6m)
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
 
