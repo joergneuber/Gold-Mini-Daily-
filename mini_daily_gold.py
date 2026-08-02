@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -283,6 +284,19 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
              linestyle="-", alpha=0.9, zorder=5)
     ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
              fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
+
+    # Konsolidierungszone: Box um Hoch/Tief der jüngeren Kurshälfte (dieselbe Phase wie
+    # die Trendlinie), sichtbar macht die aktuelle Seitwärtsspanne, ähnlich einer
+    # manuell eingezeichneten Range-Box in klassischer Chartanalyse.
+    kons_min, kons_max = trend_ausschnitt.min(), trend_ausschnitt.max()
+    x_start = mdates.date2num(trend_ausschnitt.index[0])
+    x_end = mdates.date2num(trend_ausschnitt.index[-1])
+    ax.add_patch(Rectangle(
+        (x_start, kons_min), x_end - x_start, kons_max - kons_min,
+        linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
+    ))
+    ax.text(x_end, kons_max, " Konsolidierung", color="#e8e0c8", fontsize=8.5,
+             style="italic", va="bottom", ha="left")
 
     # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
