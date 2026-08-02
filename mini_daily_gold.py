@@ -74,7 +74,7 @@ def hole_langfrist_daten(monate=36):
     return daily
 
 
-def analysiere_reaktionszonen(daily, fenster=5, bucket_usd=15, min_treffer=2, top_n=4):
+def analysiere_reaktionszonen(daily, fenster=3, bucket_usd=30, min_treffer=2, top_n=4):
     """Findet lokale Swing-Hochs/-Tiefs (Punkt ist Extremum in einem Fenster von
     +/- `fenster` Handelstagen) und gruppiert sie in Preis-Buckets. Nur Zonen mit
     mindestens `min_treffer` Reaktionen gelten als strukturell relevant - eine
@@ -107,7 +107,7 @@ def analysiere_reaktionszonen(daily, fenster=5, bucket_usd=15, min_treffer=2, to
     }
 
 
-def kombiniere_zonen(zonen_je_zeitraum, bucket_usd=15, top_n=6, referenz_preis=None, max_abstand_pct=15):
+def kombiniere_zonen(zonen_je_zeitraum, bucket_usd=30, top_n=6, referenz_preis=None, max_abstand_pct=15):
     """Führt die Zonen aus mehreren Zeitfenstern (z.B. 3/6/36 Monate) zusammen.
     Zonen aus unterschiedlichen Fenstern, die preislich nah beieinander liegen,
     werden zu einer Zone verschmolzen (Trefferzahlen addiert, Zeitfenster vermerkt).
