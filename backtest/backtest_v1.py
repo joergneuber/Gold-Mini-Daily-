@@ -6,6 +6,10 @@ Regeln (Stand: gemeinsam festgelegt im Gespräch, 03.08.2026):
 2. Einstieg: Ausbruch über den naechsten Pivot-Widerstand (aus dem
    Vortages-OHLC berechnet - bewusst KEIN Blick in die Zukunft, deshalb
    in V1 NUR Pivot-Basis, noch keine Range-Box/Umkehrzonen - siehe unten).
+   ZUSAETZLICH (nach erstem Testlauf ergaenzt): nur wenn der rollierende
+   Trend (lineare Regression ueber die letzten 144 Kerzen = ca. 12h) zu
+   diesem Zeitpunkt bereits aufwaerts zeigt - filtert Ausbrueche gegen den
+   uebergeordneten Trend heraus.
 3. Ausstieg (Stop): der durchbrochene Widerstand wird zum Stop (jetzt
    Support). Faellt der Kurs darunter zurueck, wird ausgestoppt.
 4. TP1/TP2: die naechsten beiden Pivot-Widerstaende oberhalb des Einstiegs.
@@ -69,11 +73,27 @@ def baue_pivots_je_tag(daily):
     return pivots_je_tag
 
 
+def berechne_trend_richtung(preise, fenster=144):
+    """Rollierende Trendrichtung (True = Aufwärtstrend) - Steigung einer
+    linearen Regression über die letzten `fenster` Kerzen (144 x 5-Min
+    entspricht ca. 12 Stunden, dieselbe Größenordnung wie 'die jüngere
+    Hälfte' in mini_daily_gold.py). Nutzt AUSSCHLIESSLICH die letzten
+    `fenster` bereits vergangenen Kerzen zu jedem Zeitpunkt - kein
+    Zukunftsblick, deshalb sicher fürs Backtesting."""
+    def steigung(werte):
+        x = np.arange(len(werte))
+        m, _ = np.polyfit(x, werte, 1)
+        return m
+    steigungen = preise.rolling(fenster).apply(steigung, raw=True)
+    return steigungen > 0
+
+
 def backtest():
     intraday, daily = hole_daten()
     pivots_je_tag = baue_pivots_je_tag(daily)
 
     intraday = intraday.sort_index()
+    aufwaertstrend = berechne_trend_richtung(intraday["Close"])
     trades = []
 
     in_position = False
@@ -95,7 +115,12 @@ def backtest():
             # Widerstand, aktueller Schlusskurs liegt DARÜBER - erst dann gilt
             # der Ausbruch als bestätigt (nicht schon bei bloßer Docht-Berührung,
             # das reduziert Fehlausbrüche/Whipsaws deutlich).
-            if vorheriger_schluss is not None:
+            # ZUSÄTZLICH (neu): nur handeln, wenn der rollierende Trend zu diesem
+            # Zeitpunkt bereits aufwärts zeigt - reine Ausbrüche gegen den
+            # übergeordneten Trend (z.B. im Abwärtstrend Ende Mai-Juli) werden
+            # so ausgefiltert.
+            trend_ok = bool(aufwaertstrend.get(zeit, False))
+            if vorheriger_schluss is not None and trend_ok:
                 ausgebrochene = sorted(
                     r for r in pivots["r"] if vorheriger_schluss <= r < schluss
                 )
