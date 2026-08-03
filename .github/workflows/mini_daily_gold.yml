@@ -37,7 +37,3 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
         run: python send_mail.py
-
-      - name: Vergleich GC=F vs. PAXG (nur Log, kein Einfluss auf Report)
-        continue-on-error: true
-        run: python vergleich_paxg_gcf.py
