@@ -41,6 +41,22 @@ def hole_kursdaten():
     realtime = float(intraday["Close"].iloc[-1])
     letzter_zeitpunkt = intraday.index[-1]
 
+    # yfinance liefert über fast_info oft einen aktuelleren Live-Quote als die
+    # 5-Min-Historie (die manchmal mehrere Stunden nachhinkt). Bleibt dieselbe
+    # Quelle (GC=F) - kein Wechsel auf Spot/andere Anbieter, also kein
+    # Konsistenzproblem zwischen Pivots und Realtime-Wert.
+    try:
+        live_preis = float(ticker.fast_info["last_price"])
+        if live_preis and live_preis > 0:
+            realtime = live_preis
+    except Exception as exc:
+        print(f"fast_info nicht verfügbar, nutze 5-Min-Historie als Realtime-Wert ({exc}).")
+
+    alter_minuten = (pd.Timestamp.now(tz=letzter_zeitpunkt.tz) - letzter_zeitpunkt).total_seconds() / 60
+    if alter_minuten > 120:
+        print(f"WARNUNG: Letzte Intraday-Kerze ist {alter_minuten:.0f} Minuten alt "
+              f"({letzter_zeitpunkt}) - yfinance liefert aktuell verzögerte Daten für GC=F.")
+
     # Tages-Reihe für Vortages-OHLC (Pivot-Basis)
     daily = ticker.history(period="5d", interval="1d")
     if len(daily) < 2:
