@@ -80,6 +80,7 @@ def backtest():
     entry = stop = tp1 = tp2 = None
     stufe = 0  # 0 = noch nichts erreicht, 1 = TP1, 2 = TP2
     entry_zeit = None
+    vorheriger_schluss = None
 
     for zeit, bar in intraday.iterrows():
         tag = zeit.date()
@@ -87,25 +88,30 @@ def backtest():
         if pivots is None:
             continue  # kein Vortag verfügbar (erster Tag der Reihe)
 
-        hoch, tief = float(bar["High"]), float(bar["Low"])
+        hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
 
         if not in_position:
-            # Nächsten Widerstand ÜBER dem aktuellen Kurs suchen (Basis: Bar-Close)
-            preis = float(bar["Close"])
-            kandidaten = sorted(r for r in pivots["r"] if r > preis)
-            if not kandidaten:
-                continue
-            naechster_r = kandidaten[0]
-
-            if hoch >= naechster_r:
-                entry = naechster_r
-                stop = naechster_r
-                weitere = sorted(r for r in pivots["r"] if r > naechster_r)
-                tp1 = weitere[0] if len(weitere) >= 1 else naechster_r * 1.01
-                tp2 = weitere[1] if len(weitere) >= 2 else tp1 * 1.005
-                in_position = True
-                stufe = 0
-                entry_zeit = zeit
+            # Echte Crossover-Erkennung: Vorheriger Schlusskurs lag UNTER einem
+            # Widerstand, aktueller Schlusskurs liegt DARÜBER - erst dann gilt
+            # der Ausbruch als bestätigt (nicht schon bei bloßer Docht-Berührung,
+            # das reduziert Fehlausbrüche/Whipsaws deutlich).
+            if vorheriger_schluss is not None:
+                ausgebrochene = sorted(
+                    r for r in pivots["r"] if vorheriger_schluss <= r < schluss
+                )
+                if ausgebrochene:
+                    naechster_r = ausgebrochene[0]
+                    entry = schluss
+                    # Stop = Tief der Ausbruchskerze (nicht exakt am Widerstand) -
+                    # sonst wird fast jeder Ausbruch beim typischen kurzen
+                    # Rücktest sofort wieder ausgestoppt, ohne echte Chance.
+                    stop = tief
+                    weitere = sorted(r for r in pivots["r"] if r > naechster_r)
+                    tp1 = weitere[0] if len(weitere) >= 1 else naechster_r * 1.01
+                    tp2 = weitere[1] if len(weitere) >= 2 else tp1 * 1.005
+                    in_position = True
+                    stufe = 0
+                    entry_zeit = zeit
         else:
             # Stop zuerst prüfen (konservative Annahme, falls Stop und TP im
             # selben 5-Min-Balken beide theoretisch treffbar wären)
@@ -117,14 +123,14 @@ def backtest():
                     "stufe_bei_ausstieg": stufe,
                 })
                 in_position = False
-                continue
-
-            if stufe < 2 and hoch >= tp2:
+            elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
+
+        vorheriger_schluss = schluss
 
     if in_position:
         letzter_preis = float(intraday["Close"].iloc[-1])
