@@ -523,7 +523,7 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
 
 
 def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
-    """6-Monats-Tageschart mit den bereits berechneten Reaktionszonen als Linien -
+    """4-Monats-Tageschart mit den bereits berechneten Reaktionszonen als Linien -
     macht sichtbar, wo die im Rückblick-Text genannten strukturellen Zonen herkommen."""
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -533,7 +533,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
 
     # Trendlinie über den gesamten dargestellten Zeitraum (anders als beim Intraday-Chart,
-    # wo nur die jüngere Hälfte genutzt wird - hier soll die übergeordnete 6-Monats-Bewegung
+    # wo nur die jüngere Hälfte genutzt wird - hier soll die übergeordnete 4-Monats-Bewegung
     # abgebildet werden, nicht nur ein kurzer Ausschnitt)
     x_num = mdates.date2num(schluss.index)
     steigung, achsenabschnitt = np.polyfit(x_num, schluss.values, 1)
@@ -546,7 +546,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
              fontsize=10, fontweight="bold", va="bottom", ha="left")
 
     # Range-Boxen: gleiche Berührungs-basierte Erkennung wie im Intraday-Chart, aber
-    # in 3 zeitliche Abschnitte segmentiert - über 6 Monate kann es mehrere getrennte
+    # in 3 zeitliche Abschnitte segmentiert - über 4 Monate kann es mehrere getrennte
     # Ranges auf unterschiedlichen Kursniveaus geben, nicht nur eine einzige.
     range_boxen = finde_range_boxen(daily, fenster=5, bucket_usd=30, min_treffer=2, segmente=3)
     for start_zeit, end_zeit, tief, hoch in range_boxen:
@@ -577,7 +577,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
     ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
-    ax.set_title("Gold (GC=F) - 6 Monate, strukturelle Reaktionszonen", color="#ece6d9",
+    ax.set_title("Gold (GC=F) - 4 Monate, strukturelle Reaktionszonen", color="#ece6d9",
                  fontsize=13, loc="left")
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
@@ -663,7 +663,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Intraday)</h3>
     <img src="cid:chart" style="max-width:100%;border:1px solid #3a3226;">
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (6 Monate)</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (4 Monate)</h3>
     <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
@@ -680,11 +680,11 @@ def main():
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
 
     zonen_je_zeitraum = {}
-    daily_6m = None
-    for monate in (3, 6, 36):
+    daily_lang = None
+    for monate in (3, 4, 36):
         langfrist = hole_langfrist_daten(monate=monate)
-        if monate == 6:
-            daily_6m = langfrist
+        if monate == 4:
+            daily_lang = langfrist
         zonen_je_zeitraum[monate] = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
         if zonen_je_zeitraum[monate]:
             print(f"Widerstandszonen ({monate}M): {zonen_je_zeitraum[monate]['widerstandszonen']}")
@@ -694,20 +694,20 @@ def main():
 
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum)
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
-    # Struktur-Level zeigen (enger Zeithorizont), der 6-Monats-Chart darf großzügiger sein.
+    # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
-    # Für den 6-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/6-Monats-
+    # Für den 4-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/4-Monats-
     # Fenstern (nicht 36M) - deren Zonen stammen aus Daten, die ohnehin im sichtbaren
-    # 6-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
+    # 4-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
     # Fenster bleibt außen vor, weil es auch Zonen aus einem ganz anderen (viel tieferen)
     # historischen Kursniveau liefern kann.
-    kombinierte_zonen_6m = kombiniere_zonen(
-        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 6)}
+    kombinierte_zonen_lang = kombiniere_zonen(
+        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 4)}
     )
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday)
     chart_lang_pfad = None
-    if daily_6m is not None:
-        chart_lang_pfad = baue_langfrist_chart(daily_6m, kombinierte_zonen_6m)
+    if daily_lang is not None:
+        chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
     html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
 
