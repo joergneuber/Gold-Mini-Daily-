@@ -108,9 +108,12 @@ def analysiere_reaktionszonen(daily, fenster=3, bucket_usd=30, min_treffer=2, to
 
 
 def kombiniere_zonen(zonen_je_zeitraum, bucket_usd=30, top_n=6, referenz_preis=None, max_abstand_pct=15):
-    """Führt die Zonen aus mehreren Zeitfenstern (z.B. 3/6/36 Monate) zusammen.
+    """Führt die Zonen aus mehreren Zeitfenstern (z.B. 3/4/36 Monate) zusammen.
     Zonen aus unterschiedlichen Fenstern, die preislich nah beieinander liegen,
-    werden zu einer Zone verschmolzen (Trefferzahlen addiert, Zeitfenster vermerkt).
+    werden zu einer Zone verschmolzen (Trefferzahl = Maximum über die Fenster,
+    Zeitfenster vermerkt). Absichtlich MAXIMUM statt Summe: kürzere Fenster (z.B.
+    3 Monate) sind meist eine Teilmenge längerer Fenster (z.B. 4 Monate) - dieselben
+    Swing-Punkte würden sonst doppelt gezählt, obwohl es nur eine echte Berührung ist.
     Falls referenz_preis übergeben wird, werden Zonen, die mehr als max_abstand_pct
     Prozent vom aktuellen Kurs entfernt liegen, verworfen - sonst können uralte,
     weit entfernte Zonen aus dem 36-Monats-Fenster (z.B. aus einem früheren
@@ -125,7 +128,7 @@ def kombiniere_zonen(zonen_je_zeitraum, bucket_usd=30, top_n=6, referenz_preis=N
                 bucket = round(preis / bucket_usd) * bucket_usd
                 eintrag = buckets.setdefault(bucket, {"preise": [], "treffer": 0, "fenster": set()})
                 eintrag["preise"].append(preis)
-                eintrag["treffer"] += treffer
+                eintrag["treffer"] = max(eintrag["treffer"], treffer)
                 eintrag["fenster"].add(monate)
         ergebnis = [
             (sum(e["preise"]) / len(e["preise"]), e["treffer"], sorted(e["fenster"]))
