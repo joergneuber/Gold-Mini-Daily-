@@ -55,6 +55,7 @@ def main():
     hochladen("mini_daily_gold.html", "text/html", ordner_id, service, "Briefing.html")
     hochladen("mini_daily_gold.txt", "text/plain", ordner_id, service, "Briefing.txt")
     hochladen("chart.png", "image/png", ordner_id, service, "Grafik.png")
+    hochladen("chart_tages.png", "image/png", ordner_id, service, "Grafik-Tages.png")
     hochladen("chart_langfrist.png", "image/png", ordner_id, service, "Grafik-6M.png")
 
 

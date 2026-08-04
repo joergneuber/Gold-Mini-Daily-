@@ -28,6 +28,26 @@ TICKER = "GC=F"  # Gold-Future. Yahoo/yfinance bietet keinen zuverlässig abrufb
                   # nur wenige USD neben dem echten Spot-Kurs.
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
+# Positionstrading-Signal (Backtest V1e, per Rückblick im Gespräch bestätigt:
+# 34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%). Läuft bei JEDEM
+# Report-Lauf komplett neu von POSITIONSTRADING_START an durch, um den
+# aktuellen Stand zu ermitteln - kein gespeicherter Zustand zwischen den
+# Läufen nötig, da die Simulation deterministisch aus den historischen
+# Kursdaten reproduzierbar ist.
+POSITIONSTRADING_START = "2019-01-01"
+POSITIONSTRADING_TREND_FENSTER = 50
+POSITIONSTRADING_SWING_FENSTER = 10
+POSITIONSTRADING_COOLDOWN_TAGE = 3
+
+POSITIONSTRADING_REGELN_TEXT = (
+    "Regeln: Nur Long. Trend positiv (Tages-Regression über 50 Handelstage) "
+    "und Kurs berührt ein rollierendes 10-Tage-Tief, schließt aber wieder "
+    "darüber -> KAUF. Stop = dieses Tief. TP1/TP2 = 2R/3R (R = Einstieg-Stop): "
+    "TP1 erreicht -> Stop auf Breakeven, TP2 erreicht -> Stop auf TP1, danach "
+    "täglich am 10-Tage-Tief nachgezogen. Stop erreicht -> VERKAUF, danach "
+    "3 Handelstage Cooldown ohne neuen Einstieg."
+)
+
 
 def hole_kursdaten():
     """Liefert Realtime-Kurs, Vortages-OHLC und eine Intraday-Kursreihe für den Chart."""
@@ -541,6 +561,67 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     return pfad
 
 
+def baue_tageschart(daily, status, pfad="chart_tages.png"):
+    """Tageschart (ca. 12 Monate) auf genau der Datenbasis, auf der das
+    Positionstrading-Signal beruht: 50-Tage-Trend, 10-Tage-Swing-Tief-Referenz,
+    plus Einstieg/Stop/TP1/TP2, falls aktuell eine Position offen ist. Macht
+    das Signal aus dem Positionstrading-Abschnitt visuell nachvollziehbar,
+    statt nur als Zahlen im Text zu stehen."""
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
+    fig.patch.set_facecolor("#14110d")
+    ax.set_facecolor("#14110d")
+
+    schluss = daily["Close"]
+    ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
+
+    # 50-Tage-Trend (gleiche Methode wie im Positionstrading-Signal) über den
+    # letzten verfügbaren Ausschnitt dieses Charts eingezeichnet.
+    trend_ausschnitt = schluss.iloc[-POSITIONSTRADING_TREND_FENSTER:] if len(schluss) >= POSITIONSTRADING_TREND_FENSTER else schluss
+    x_num = mdates.date2num(trend_ausschnitt.index)
+    steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
+    trend_werte = steigung * x_num + achsenabschnitt
+    trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
+    trend_label = "Aufwärtstrend (50T)" if steigung > 0 else "Abwärtstrend (50T)"
+    ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8, zorder=5)
+    ax.text(trend_ausschnitt.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
+             fontsize=9.5, fontweight="bold", va="bottom", ha="right")
+
+    # Rollierendes 10-Tage-Swing-Tief - dieselbe Referenz, die für Einstieg/Stop genutzt wird.
+    swing_tief = daily["Low"].rolling(POSITIONSTRADING_SWING_FENSTER).min().shift(1)
+    ax.plot(daily.index, swing_tief, color="#6fa8dc", linewidth=0.9, linestyle=":", alpha=0.7)
+    ax.text(daily.index[-1], swing_tief.iloc[-1], "  10T-Swing-Tief", color="#6fa8dc",
+             fontsize=8, style="italic", va="center", ha="left")
+
+    # Falls aktuell eine Position offen ist: Einstieg/Stop/TP1/TP2 einzeichnen.
+    if status["status"] == "offen":
+        ax.axhline(status["einstieg"], color="#c9c2b0", linewidth=1.0, linestyle=":", alpha=0.8)
+        ax.text(daily.index[0], status["einstieg"], "Einstieg  ", color="#c9c2b0",
+                 fontsize=8.5, va="bottom", ha="right")
+        ax.axhline(status["stop"], color="#d9534f", linewidth=1.2, linestyle="--", alpha=0.85)
+        ax.text(daily.index[-1], status["stop"], f" Stop {status['stop']:,.0f}".replace(",", "."),
+                 color="#e8887a", fontsize=8.5, fontweight="bold", va="center", ha="left")
+        ax.axhline(status["tp1"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.7)
+        ax.text(daily.index[-1], status["tp1"], f" TP1 {status['tp1']:,.0f}".replace(",", "."),
+                 color="#9fcf8f", fontsize=8, va="center", ha="left")
+        ax.axhline(status["tp2"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.5)
+        ax.text(daily.index[-1], status["tp2"], f" TP2 {status['tp2']:,.0f}".replace(",", "."),
+                 color="#9fcf8f", fontsize=8, va="center", ha="left")
+
+    ax.margins(x=0.10)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.tick_params(colors="#a89d87", labelsize=10)
+    for spine in ax.spines.values():
+        spine.set_color("#3a3226")
+    ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
+    ax.set_title("Gold (GC=F) - Tageschart (Positionstrading-Basis)", color="#ece6d9", fontsize=13, loc="left")
+    ax.set_ylabel("USD", color="#a89d87", fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(pfad, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return pfad
+
+
 def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     """4-Monats-Tageschart mit den bereits berechneten Reaktionszonen als Linien -
     macht sichtbar, wo die im Rückblick-Text genannten strukturellen Zonen herkommen."""
@@ -606,7 +687,48 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     return pfad
 
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text):
+def formatiere_positionstrading(status):
+    """Baut aus dem Ergebnis von berechne_positionstrading_status() einen
+    lesbaren Text-Absatz - für Text- und HTML-Report gemeinsam genutzt.
+    Erste Zeile ist IMMER das explizite Tages-Signal (KAUF/VERKAUF/HALTEN/
+    KEIN SIGNAL), danach folgt die Begründung/der Kontext."""
+    if status["status"] == "keine_daten":
+        return "SIGNAL: nicht verfügbar (zu wenig Datenhistorie)."
+
+    signal_text = {
+        "KAUF": "SIGNAL: KAUF - heute ausgelöst",
+        "VERKAUF": "SIGNAL: VERKAUF - heute ausgelöst (Stop erreicht)",
+        "HALTEN": "SIGNAL: HALTEN - Position bereits offen, kein neues Ereignis heute",
+        "KEIN_SIGNAL": "SIGNAL: KEIN SIGNAL - keine offene Position, kein neuer Einstieg heute",
+    }[status["signal"]]
+
+    if status["status"] == "offen":
+        stufe_text = {0: "noch kein Ziel erreicht", 1: "TP1 erreicht, Stop auf Breakeven",
+                      2: "TP2 erreicht, Stop wird laufend nachgezogen"}[status["stufe"]]
+        kontext = (
+            f"Simulierte Position seit {status['einstieg_datum'].strftime('%d.%m.%Y')} OFFEN "
+            f"({status['haltedauer_tage']} Tage). Einstieg {status['einstieg']:,.2f} USD, "
+            f"aktuell {status['aktueller_kurs']:,.2f} USD ({status['unrealisiert_pct']:+.2f}% unrealisiert). "
+            f"Stop bei {status['stop']:,.2f} USD, TP1 {status['tp1']:,.2f} USD, TP2 {status['tp2']:,.2f} USD "
+            f"({stufe_text})."
+        )
+    else:
+        letzter = status.get("letzter_trade")
+        cooldown_text = " (aktuell in Cooldown nach Stop)" if status.get("im_cooldown") else ""
+        if letzter:
+            kontext = (
+                f"Keine offene Position{cooldown_text}. Letzter simulierter Trade: "
+                f"{letzter['einstieg_datum'].strftime('%d.%m.%Y')} bis {letzter['ausstieg_datum'].strftime('%d.%m.%Y')}, "
+                f"Ergebnis {letzter['ergebnis_pct']:+.2f}%."
+            )
+        else:
+            kontext = f"Keine offene Position{cooldown_text}. Noch kein abgeschlossener Trade in der Historie."
+
+    return (signal_text + "\n" + kontext).replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = jetzt.strftime("%A, %d. %B %Y")
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -620,6 +742,8 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text):
             f"({daten_zeit}) - yfinance liefert gerade verzögerte Daten für GC=F. Der Realtime-Kurs oben "
             f"kann trotzdem aktueller sein (separate Live-Quote), Pivot-/Chart-Basis ist aber diese Kerze.\n"
         )
+
+    positionstrading_text = formatiere_positionstrading(positionstrading_status)
 
     def liste(werte):
         return " / ".join(f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") for v in werte)
@@ -648,13 +772,19 @@ SCHLUSSKURS (VORTAG)
 RUECKBLICK
 {rueckblick_text}
 
+POSITIONSTRADING-SIGNAL (Backtest V1e, Halteperiode Tage bis Wochen)
+{positionstrading_text}
+{POSITIONSTRADING_REGELN_TEXT}
+Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+(34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%).
+
 ---
 Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: yfinance
 """
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = jetzt.strftime("%A, %d. %B %Y")
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -669,6 +799,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     yfinance liefert gerade verzögerte Daten für GC=F. Der Realtime-Kurs unten kann trotzdem aktueller
     sein (separate Live-Quote), Pivot-/Chart-Basis ist aber diese Kerze.
     </p>"""
+
+    positionstrading_text = formatiere_positionstrading(positionstrading_status)
 
     def level_liste(werte, farbe):
         return "".join(
@@ -706,8 +838,19 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Intraday)</h3>
     <img src="cid:chart" style="max-width:100%;border:1px solid #3a3226;">
 
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Positionstrading-Basis)</h3>
+    <img src="cid:chart_tages" style="max-width:100%;border:1px solid #3a3226;">
+
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (4 Monate)</h3>
     <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Positionstrading-Signal (Backtest V1e)</h3>
+    <p style="line-height:1.6;"><strong style="color:#e8b95c;">{positionstrading_text.split(chr(10), 1)[0]}</strong><br>{positionstrading_text.split(chr(10), 1)[1] if chr(10) in positionstrading_text else ''}</p>
+    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{POSITIONSTRADING_REGELN_TEXT}</p>
+    <p style="color:#a89d87;font-size:10.5px;">
+    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+    (34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%).
+    </p>
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
     Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: yfinance
@@ -715,6 +858,110 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </body></html>
     """
     return html
+
+
+def berechne_positionstrading_status():
+    """Simuliert die V1e-Positionstrading-Regeln (Trendfolge + Swing-Tief-Bounce,
+    Halteperiode Tage bis Wochen) von POSITIONSTRADING_START bis heute und
+    liefert den AKTUELLEN Stand - läuft bei jedem Report-Lauf komplett neu
+    durch (deterministisch aus den historischen Kursdaten), kein gespeicherter
+    Zustand zwischen den Läufen nötig.
+
+    Regeln (identisch zu backtest_v1e.py, dort ausführlicher dokumentiert):
+    - Nur Long. Trend: rollierende Regression über die letzten 50 Handelstage
+      (nur bis gestern). Einstieg: bestätigter Bounce an einem rollierenden
+      10-Tage-Swing-Tief. Stop: dieses Tief, fest. TP1/TP2 = 2R/3R.
+      Stufenregel: TP1->Breakeven, TP2->TP1-Niveau, danach kontinuierliches
+      Nachziehen am Swing-Tief. Cooldown 3 Handelstage nach einem Stop.
+
+    Rein informativ - siehe Disclaimer im Report. Kein automatisiertes
+    Handelssignal, keine Anlageempfehlung.
+    """
+    ticker = yf.Ticker(TICKER)
+    daily = ticker.history(start=POSITIONSTRADING_START, interval="1d").sort_index()
+    if len(daily) < POSITIONSTRADING_TREND_FENSTER + 5:
+        return {"status": "keine_daten"}
+
+    def steigung(werte):
+        x = np.arange(len(werte))
+        m, _ = np.polyfit(x, werte, 1)
+        return m
+
+    aufwaertstrend = daily["Close"].rolling(POSITIONSTRADING_TREND_FENSTER).apply(steigung, raw=True).shift(1) > 0
+    swing_tief_referenz = daily["Low"].rolling(POSITIONSTRADING_SWING_FENSTER).min().shift(1)
+
+    in_position = False
+    entry = stop = tp1 = tp2 = None
+    stufe = 0
+    entry_datum = None
+    cooldown_bis = None
+    letzter_abgeschlossener_trade = None
+
+    for datum, bar in daily.iterrows():
+        hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+        trend_auf = aufwaertstrend.get(datum)
+        ref_tief = swing_tief_referenz.get(datum)
+
+        if not in_position:
+            if cooldown_bis is not None and datum < cooldown_bis:
+                continue
+            if pd.notna(trend_auf) and trend_auf and pd.notna(ref_tief):
+                ref_tief = float(ref_tief)
+                if tief <= ref_tief and schluss > ref_tief:
+                    entry = schluss
+                    stop = ref_tief
+                    if stop < entry:
+                        r = entry - stop
+                        tp1 = entry + 2 * r
+                        tp2 = entry + 3 * r
+                        in_position = True
+                        stufe = 0
+                        entry_datum = datum
+        else:
+            if stufe == 2 and pd.notna(ref_tief):
+                stop = max(stop, float(ref_tief))
+            if tief <= stop:
+                letzter_abgeschlossener_trade = {
+                    "einstieg_datum": entry_datum, "ausstieg_datum": datum,
+                    "ergebnis_pct": (stop - entry) / entry * 100,
+                }
+                in_position = False
+                cooldown_bis = datum + pd.Timedelta(days=POSITIONSTRADING_COOLDOWN_TAGE)
+            elif stufe < 2 and hoch >= tp2:
+                stufe = 2
+                stop = max(stop, tp1)
+            elif stufe < 1 and hoch >= tp1:
+                stufe = 1
+                stop = max(stop, entry)
+
+    letzter_kurs = float(daily["Close"].iloc[-1])
+    letztes_datum = daily.index[-1]
+
+    if in_position:
+        # War der EINSTIEG genau die letzte (heutige) Kerze -> heute ausgelöstes
+        # Kaufsignal. Sonst: Position läuft bereits, heutiges Signal = Halten.
+        heutiges_signal = "KAUF" if entry_datum == letztes_datum else "HALTEN"
+        return {
+            "status": "offen",
+            "signal": heutiges_signal,
+            "einstieg_datum": entry_datum, "einstieg": entry,
+            "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe,
+            "aktueller_kurs": letzter_kurs,
+            "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
+            "haltedauer_tage": (letztes_datum - entry_datum).days,
+        }
+    else:
+        # War der AUSSTIEG (Stop) genau die letzte (heutige) Kerze -> heute
+        # ausgelöstes Verkaufssignal. Sonst: schon länger flach, kein Signal heute.
+        heutiges_signal = "VERKAUF"
+        if not (letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_datum"] == letztes_datum):
+            heutiges_signal = "KEIN_SIGNAL"
+        return {
+            "status": "keine_position",
+            "signal": heutiges_signal,
+            "letzter_trade": letzter_abgeschlossener_trade,
+            "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
+        }
 
 
 def main():
@@ -751,8 +998,20 @@ def main():
     chart_lang_pfad = None
     if daily_lang is not None:
         chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad)
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text)
+
+    positionstrading_status = berechne_positionstrading_status()
+    print(f"Positionstrading-Status: {positionstrading_status['status']}")
+
+    # Für den neuen Tageschart reicht ein 12-Monats-Ausschnitt (genug für 50-Tage-
+    # Trend + 10-Tage-Swing-Tief-Referenz, aber übersichtlicher als die vollen
+    # ~7 Jahre, die für das Positionstrading-Signal selbst durchgerechnet werden).
+    daily_fuer_tageschart = hole_langfrist_daten(monate=12)
+    chart_tages_pfad = None
+    if daily_fuer_tageschart is not None:
+        chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
+
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
@@ -762,7 +1021,7 @@ def main():
     print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
-    print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png, chart_langfrist.png")
+    print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png, chart_tages.png, chart_langfrist.png")
 
 
 if __name__ == "__main__":
