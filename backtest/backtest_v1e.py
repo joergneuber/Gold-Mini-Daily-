@@ -21,7 +21,10 @@ Regeln:
 5. TP1 = Einstieg + 2R, TP2 = Einstieg + 3R (R = Einstieg - Stop).
 6. Stufenregel (identisch zu allen anderen Varianten):
    - TP1 erreicht -> Stop auf Breakeven
-   - TP2 erreicht -> Stop auf TP1-Niveau
+   - TP2 erreicht -> Stop auf TP1-Niveau, DANACH kontinuierlich am
+     rollierenden 10-Tage-Swing-Tief nachgezogen (NEU, nach Auswertung
+     ergaenzt - vorher blieb eine Position wegen fehlender Nachzieh-Logik
+     unbegrenzt lange offen, siehe Git-Historie/Gespraech).
 7. COOLDOWN: 3 Handelstage nach einem Stop-Ausstieg keine neuen Einstiege
    (gleiche Lehre wie bei den Intraday-Varianten - verhindert sofortiges
    Wieder-Einsteigen auf demselben Level).
@@ -87,6 +90,15 @@ def backtest():
                         stufe = 0
                         entry_datum = datum
         else:
+            # Stufe 2 (TP2 erreicht): Stop wird ab jetzt KONTINUIERLICH am
+            # rollierenden 10-Tage-Swing-Tief nachgezogen (dieselbe Referenz
+            # wie beim Einstieg) - verhindert, dass die Position bei einem
+            # starken Trend unbegrenzt lange offen bleibt, ohne dass jemals
+            # wieder eine echte Korrektur den ursprünglichen TP1-Stop erreicht
+            # (siehe Auswertung: ein Trade blieb sonst 7 Jahre lang offen).
+            if stufe == 2 and pd.notna(ref_tief):
+                stop = max(stop, float(ref_tief))
+
             if tief <= stop:
                 trades.append({
                     "einstieg_datum": entry_datum, "ausstieg_datum": datum,
