@@ -29,8 +29,11 @@ NEU in V1d - Scaling-out statt Stufenregel:
 Der Gesamt-Trade-Ertrag ist der GEWICHTETE Durchschnitt aus beiden Teilen
 (35% zum TP1-Ergebnis, 65% zum jeweiligen Ausstiegsergebnis der Restposition).
 
-Datenquelle: yfinance (GC=F), 5-Min-Kerzen (~60 Tage Yahoo-Limit),
-Tagesdaten fuer den Trendfilter.
+Datenquelle: yfinance (GC=F). ZEITRAUM (GEAENDERT, Nutzerwunsch): 1. Januar
+bis gestern, Stundenkerzen statt 5-Minuten (Yahoo-Limit fuer 5-Min: ~60 Tage).
+
+COOLDOWN (NEU): nach jedem Trade-Ausstieg COOLDOWN_STUNDEN keine neuen
+Einstiege - siehe V1c fuer die Begruendung (Whipsaw-Cluster in der Vorversion).
 """
 
 import pandas as pd
@@ -38,15 +41,17 @@ import numpy as np
 import yfinance as yf
 
 TICKER = "GC=F"
+START_DATUM = "2026-01-01"
 TAGESTREND_FENSTER = 20
-LIQUIDITAET_FENSTER = 36
+LIQUIDITAET_FENSTER = 3      # Stundenkerzen (~3h), umgerechnet von vorher 36x5min
 TEILGEWINN_ANTEIL = 0.35  # 35% der Position bei TP1 realisieren
+COOLDOWN_STUNDEN = 6
 
 
 def hole_daten():
     ticker = yf.Ticker(TICKER)
-    intraday = ticker.history(period="60d", interval="5m")
-    daily = ticker.history(period="120d", interval="1d")
+    intraday = ticker.history(start=START_DATUM, interval="1h")
+    daily = ticker.history(start="2025-11-01", interval="1d")
     return intraday, daily
 
 
@@ -77,6 +82,7 @@ def backtest():
     tp1_realisiert = False
     entry_zeit = None
     tp1_zeit = tp1_ergebnis_pct = None
+    cooldown_bis = None
 
     for zeit, bar in intraday.iterrows():
         tag = zeit.date()
@@ -88,6 +94,9 @@ def backtest():
         ref_tief = swing_tief_referenz.get(zeit)
 
         if not in_position:
+            if cooldown_bis is not None and zeit < cooldown_bis:
+                continue
+
             if trend_auf and pd.notna(ref_tief):
                 ref_tief = float(ref_tief)
                 if tief <= ref_tief and schluss > ref_tief:
@@ -116,6 +125,7 @@ def backtest():
                     "gesamt_ergebnis_pct": gesamt_pct,
                 })
                 in_position = False
+                cooldown_bis = zeit + pd.Timedelta(hours=COOLDOWN_STUNDEN)
                 continue
 
             # TP2 (nur relevant, wenn TP1 schon realisiert ist - Restposition voll geschlossen)

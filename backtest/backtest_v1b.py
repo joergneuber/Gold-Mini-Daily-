@@ -24,7 +24,12 @@ Unterstuetzung soll gerade AUCH in Abwaertsphasen (kurzfristige Erholungen)
 funktionieren koennen, ein Aufwaertstrend-Filter wuerde das Konzept
 konterkarieren.
 
-Datenquelle: yfinance (GC=F), 5-Min-Kerzen (~60 Tage Yahoo-Limit).
+Datenquelle: yfinance (GC=F). ZEITRAUM (GEAENDERT, Nutzerwunsch): 1. Januar
+bis gestern, Stundenkerzen statt 5-Minuten (Yahoo-Limit fuer 5-Min: ~60 Tage;
+Stundenkerzen bis zu 2 Jahre zurueck).
+
+COOLDOWN (NEU): nach jedem Trade-Ausstieg COOLDOWN_STUNDEN keine neuen
+Einstiege - verhindert sofortiges Wieder-Einsteigen auf demselben Level.
 """
 
 import pandas as pd
@@ -32,6 +37,8 @@ import numpy as np
 import yfinance as yf
 
 TICKER = "GC=F"
+START_DATUM = "2026-01-01"
+COOLDOWN_STUNDEN = 6
 
 
 def klassische_pivots(high, low, close):
@@ -45,8 +52,8 @@ def klassische_pivots(high, low, close):
 
 def hole_daten():
     ticker = yf.Ticker(TICKER)
-    intraday = ticker.history(period="60d", interval="5m")
-    daily = ticker.history(period="80d", interval="1d")
+    intraday = ticker.history(start=START_DATUM, interval="1h")
+    daily = ticker.history(start="2025-11-01", interval="1d")
     return intraday, daily
 
 
@@ -73,6 +80,7 @@ def backtest():
     entry = stop = tp1 = tp2 = None
     stufe = 0
     entry_zeit = None
+    cooldown_bis = None
 
     for zeit, bar in intraday.iterrows():
         tag = zeit.date()
@@ -83,6 +91,9 @@ def backtest():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
 
         if not in_position:
+            if cooldown_bis is not None and zeit < cooldown_bis:
+                continue
+
             s1 = pivots["s1"]
             # Bestätigte Umkehr an S1: Kerze taucht bei/unter S1, schließt
             # aber wieder darüber (Docht-Umkehr an der Unterstützung).
@@ -110,6 +121,7 @@ def backtest():
                     "stufe_bei_ausstieg": stufe,
                 })
                 in_position = False
+                cooldown_bis = zeit + pd.Timedelta(hours=COOLDOWN_STUNDEN)
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)

@@ -29,9 +29,17 @@ Umkehrzonen/Struktur-Support als "expandierende" (nur Vergangenheit
 nutzende) Version ist fuer eine V2 vorgesehen, falls diese erste Auswertung
 vielversprechend aussieht.
 
-Datenquelle: yfinance (GC=F). 5-Min-Kerzen sind bei Yahoo nur fuer die
-letzten ca. 60 Tage verfuegbar (Yahoo-seitige Beschraenkung, nicht
-aenderbar) - das ist die Stichprobengroesse dieses Backtests.
+Datenquelle: yfinance (GC=F). ZEITRAUM (GEAENDERT, Nutzerwunsch): 1. Januar
+bis gestern - dafuer STUNDENKERZEN statt 5-Minuten, da Yahoo 5-Minuten-Daten
+nur fuer die letzten ca. 60 Tage kostenlos herausgibt, Stundenkerzen aber bis
+zu 2 Jahre zurueck. Trade-off: weniger Praezision beim Einstiegs-/Stop-Preis
+(eine Stundenkerze hat oft eine groessere Spanne als eine 5-Minuten-Kerze),
+dafuer echte Langzeit-Stichprobe statt nur 60 Tage.
+
+COOLDOWN (NEU, nach Auswertung der V1c/V1d-Ergebnisse ergaenzt): nach jedem
+Trade-Ausstieg werden neue Einstiege fuer COOLDOWN_STUNDEN gesperrt - verhindert,
+dass nach einem Stop sofort wieder auf demselben/aehnlichem Level eingestiegen
+wird (beobachtetes Whipsaw-Muster: 15 "unabhaengige" Trades an einem einzigen Tag).
 """
 
 import pandas as pd
@@ -39,6 +47,8 @@ import numpy as np
 import yfinance as yf
 
 TICKER = "GC=F"
+START_DATUM = "2026-01-01"
+COOLDOWN_STUNDEN = 6
 
 
 def klassische_pivots(high, low, close):
@@ -54,8 +64,10 @@ def klassische_pivots(high, low, close):
 
 def hole_daten():
     ticker = yf.Ticker(TICKER)
-    intraday = ticker.history(period="60d", interval="5m")
-    daily = ticker.history(period="80d", interval="1d")
+    intraday = ticker.history(start=START_DATUM, interval="1h")
+    # Daily-Reihe braucht etwas Vorlauf vor START_DATUM (für den Vortag am
+    # allerersten Backtest-Tag sowie ggf. Trendfenster in anderen Varianten).
+    daily = ticker.history(start="2025-11-01", interval="1d")
     return intraday, daily
 
 
@@ -73,7 +85,7 @@ def baue_pivots_je_tag(daily):
     return pivots_je_tag
 
 
-def berechne_trend_richtung(preise, fenster=144):
+def berechne_trend_richtung(preise, fenster=12):
     """Rollierende Trendrichtung (True = Aufwärtstrend) - Steigung einer
     linearen Regression über die letzten `fenster` Kerzen (144 x 5-Min
     entspricht ca. 12 Stunden, dieselbe Größenordnung wie 'die jüngere
@@ -101,6 +113,7 @@ def backtest():
     stufe = 0  # 0 = noch nichts erreicht, 1 = TP1, 2 = TP2
     entry_zeit = None
     vorheriger_schluss = None
+    cooldown_bis = None
 
     for zeit, bar in intraday.iterrows():
         tag = zeit.date()
@@ -111,6 +124,13 @@ def backtest():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
 
         if not in_position:
+            # Cooldown: nach einem gerade beendeten Trade für COOLDOWN_STUNDEN
+            # keine neuen Einstiege - verhindert sofortiges Wieder-Einsteigen
+            # auf demselben/ähnlichem Level (Whipsaw-Schutz).
+            if cooldown_bis is not None and zeit < cooldown_bis:
+                vorheriger_schluss = schluss
+                continue
+
             # Echte Crossover-Erkennung: Vorheriger Schlusskurs lag UNTER einem
             # Widerstand, aktueller Schlusskurs liegt DARÜBER - erst dann gilt
             # der Ausbruch als bestätigt (nicht schon bei bloßer Docht-Berührung,
@@ -148,6 +168,7 @@ def backtest():
                     "stufe_bei_ausstieg": stufe,
                 })
                 in_position = False
+                cooldown_bis = zeit + pd.Timedelta(hours=COOLDOWN_STUNDEN)
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)

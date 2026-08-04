@@ -27,8 +27,14 @@ Regeln:
    - TP2 erreicht -> Stop auf TP1-Niveau
    - Nur verbessern, nie verschlechtern; nur einmal je Stufe.
 
-Datenquelle: yfinance (GC=F). 5-Min-Kerzen ~60 Tage (Yahoo-Limit),
-Tagesdaten separat fuer den Trendfilter.
+Datenquelle: yfinance (GC=F). ZEITRAUM (GEAENDERT, Nutzerwunsch): 1. Januar
+bis gestern, Stundenkerzen statt 5-Minuten (Yahoo-Limit fuer 5-Min: ~60 Tage;
+Stundenkerzen bis zu 2 Jahre zurueck). LIQUIDITAET_FENSTER entsprechend von
+36x5min (~3h) auf 3x1h (~3h) umgerechnet - gleiche Zeitspanne, andere Aufloesung.
+
+COOLDOWN (NEU, nach Auswertung ergaenzt - vorherige Version hatte alle 15
+Trades an einem einzigen Tag geclustert, ein klares Whipsaw-Symptom): nach
+jedem Trade-Ausstieg COOLDOWN_STUNDEN keine neuen Einstiege.
 """
 
 import pandas as pd
@@ -36,14 +42,16 @@ import numpy as np
 import yfinance as yf
 
 TICKER = "GC=F"
+START_DATUM = "2026-01-01"
 TAGESTREND_FENSTER = 20      # Handelstage für die Trendrichtung
-LIQUIDITAET_FENSTER = 36     # 5-Min-Kerzen (~3h) für das Swing-Tief
+LIQUIDITAET_FENSTER = 3      # Stundenkerzen (~3h) für das Swing-Tief
+COOLDOWN_STUNDEN = 6
 
 
 def hole_daten():
     ticker = yf.Ticker(TICKER)
-    intraday = ticker.history(period="60d", interval="5m")
-    daily = ticker.history(period="120d", interval="1d")
+    intraday = ticker.history(start=START_DATUM, interval="1h")
+    daily = ticker.history(start="2025-11-01", interval="1d")
     return intraday, daily
 
 
@@ -79,6 +87,7 @@ def backtest():
     entry = stop = tp1 = tp2 = None
     stufe = 0
     entry_zeit = None
+    cooldown_bis = None
 
     for zeit, bar in intraday.iterrows():
         tag = zeit.date()
@@ -90,6 +99,9 @@ def backtest():
         ref_tief = swing_tief_referenz.get(zeit)
 
         if not in_position:
+            if cooldown_bis is not None and zeit < cooldown_bis:
+                continue
+
             if trend_auf and pd.notna(ref_tief):
                 ref_tief = float(ref_tief)
                 # Bounce-Bestätigung: Kerze berührt/unterschreitet das
@@ -113,6 +125,7 @@ def backtest():
                     "stufe_bei_ausstieg": stufe,
                 })
                 in_position = False
+                cooldown_bis = zeit + pd.Timedelta(hours=COOLDOWN_STUNDEN)
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
