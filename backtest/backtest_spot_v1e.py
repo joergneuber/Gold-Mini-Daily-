@@ -24,6 +24,15 @@ Regeln (identisch zu backtest_v1e.py):
    Swing-Tief. Stop: dieses Tief, fest. TP1/TP2 = 2R/3R. Stufenregel:
    TP1->Breakeven, TP2->TP1-Niveau, danach kontinuierlich nachgezogen.
    Cooldown 3 Handelstage nach einem Stop.
+
+HINWEIS (04.08.2026): APIFreaks liefert für Samstag/Sonntag verzerrte
+Kerzen - deren Tagesrange ist im Schnitt DOPPELT so groß wie an
+Wochentagen und bei 86% aller Sonntage größer als sowohl die des
+vorangegangenen Freitags als auch die des folgenden Montags. Das
+verfälscht die 10-Tage-Swing-Tief-Referenz, auf der Einstieg und Stop
+direkt beruhen. Deshalb werden Wochenend-Zeilen jetzt schon beim Laden
+der Daten entfernt (siehe hole_daten()), bevor irgendeine Berechnung
+darauf läuft.
 """
 
 import os
@@ -77,8 +86,9 @@ def hole_jahres_ausschnitt(api_key, start, ende):
 
 
 def hole_daten():
-    """Holt die komplette Historie in 365-Tage-Häppchen (API-Limit) und fügt
-    sie zu einer durchgehenden Tagesreihe zusammen."""
+    """Holt die komplette Historie in 365-Tage-Häppchen (API-Limit), fügt
+    sie zu einer durchgehenden Tagesreihe zusammen und entfernt
+    Wochenend-Zeilen (Sa/So), da APIFreaks dafür verzerrte Ranges liefert."""
     api_key = hole_api_key()
     heute = date.today()
     start_gesamt = date(START_JAHR, 1, 1)
@@ -94,7 +104,14 @@ def hole_daten():
         time.sleep(0.5)  # kleine Pause zwischen den Abfragen, freundlich zur API
 
     daily = pd.concat(teile, ignore_index=True)
-    daily = daily.drop_duplicates(subset="Datum").sort_values("Datum").set_index("Datum")
+    daily = daily.drop_duplicates(subset="Datum").sort_values("Datum")
+
+    # --- Wochenend-Kerzen rausfiltern (APIFreaks liefert verzerrte Sa/So-Ranges) ---
+    vor_filter = len(daily)
+    daily = daily[daily["Datum"].dt.dayofweek < 5]  # 0=Mo ... 4=Fr
+    print(f"Wochenend-Zeilen entfernt: {vor_filter - len(daily)} von {vor_filter}")
+
+    daily = daily.set_index("Datum")
     return daily
 
 
@@ -184,12 +201,6 @@ def main():
 
     trades_df.to_csv("backtest_spot_v1e_trades.csv", index=False)
 
-    # --- Wochenend-Kerzen rausfiltern (APIFreaks liefert verzerrte Sa/So-Ranges) ---
-    df["Datum"] = pd.to_datetime(df["Datum"])
-    vor_filter = len(df)
-    df = df[df["Datum"].dt.dayofweek < 5].reset_index(drop=True)  # 0=Mo ... 4=Fr
-    print(f"Wochenend-Zeilen entfernt: {vor_filter - len(df)} von {vor_filter}")
-   
     n = len(trades_df)
     gewinner = trades_df[trades_df["ergebnis_pct"] > 0]
     verlierer = trades_df[trades_df["ergebnis_pct"] <= 0]
