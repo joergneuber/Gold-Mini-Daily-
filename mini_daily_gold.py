@@ -607,8 +607,19 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
 
 
 def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text):
-    heute = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%A, %d. %B %Y")
-    zeit = daten["letzter_zeitpunkt"].strftime("%d.%m. %H:%M")
+    jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
+    heute = jetzt.strftime("%A, %d. %B %Y")
+    erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
+    daten_zeit = daten["letzter_zeitpunkt"].astimezone(ZoneInfo("Europe/Berlin")).strftime("%d.%m. %H:%M")
+    alter_minuten = (jetzt - daten["letzter_zeitpunkt"]).total_seconds() / 60
+
+    warnzeile = ""
+    if alter_minuten > 120:
+        warnzeile = (
+            f"\n⚠ HINWEIS: Die letzte verfügbare Kursdaten-Kerze ist {alter_minuten / 60:.1f} Stunden alt "
+            f"({daten_zeit}) - yfinance liefert gerade verzögerte Daten für GC=F. Der Realtime-Kurs oben "
+            f"kann trotzdem aktueller sein (separate Live-Quote), Pivot-/Chart-Basis ist aber diese Kerze.\n"
+        )
 
     def liste(werte):
         return " / ".join(f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") for v in werte)
@@ -617,8 +628,8 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text):
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     text = f"""MINI DAILY: GOLD
-{heute} - Stand {zeit}
-
+{heute} - Erstellt um {erstellt_zeit} - Kursdaten-Stand {daten_zeit}
+{warnzeile}
 VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
@@ -644,8 +655,20 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: yf
 
 
 def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname):
-    heute = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%A, %d. %B %Y")
-    zeit = daten["letzter_zeitpunkt"].strftime("%d.%m. %H:%M")
+    jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
+    heute = jetzt.strftime("%A, %d. %B %Y")
+    erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
+    daten_zeit = daten["letzter_zeitpunkt"].astimezone(ZoneInfo("Europe/Berlin")).strftime("%d.%m. %H:%M")
+    alter_minuten = (jetzt - daten["letzter_zeitpunkt"]).total_seconds() / 60
+
+    warnblock = ""
+    if alter_minuten > 120:
+        warnblock = f"""
+    <p style="background:#3a2a1a;border-left:3px solid #d9a441;padding:10px 14px;color:#e8c98a;font-size:12.5px;">
+    ⚠ Die letzte verfügbare Kursdaten-Kerze ist {alter_minuten / 60:.1f} Stunden alt ({daten_zeit}) -
+    yfinance liefert gerade verzögerte Daten für GC=F. Der Realtime-Kurs unten kann trotzdem aktueller
+    sein (separate Live-Quote), Pivot-/Chart-Basis ist aber diese Kerze.
+    </p>"""
 
     def level_liste(werte, farbe):
         return "".join(
@@ -658,7 +681,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     html = f"""
     <html><body style="background:#14110d;color:#ece6d9;font-family:monospace;padding:20px;">
     <h1 style="color:#e8b95c;font-family:serif;">Mini Daily: Gold</h1>
-    <p style="color:#a89d87;">{heute} · Stand {zeit}</p>
+    <p style="color:#a89d87;">{heute} · Erstellt um {erstellt_zeit} · Kursdaten-Stand {daten_zeit}</p>
+    {warnblock}
     <hr style="border-color:#3a3226;">
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
