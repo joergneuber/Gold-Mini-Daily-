@@ -687,11 +687,34 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     return pfad
 
 
+WOCHENTAGE_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+MONATE_DE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
+             "August", "September", "Oktober", "November", "Dezember"]
+
+
+def deutsches_datum(dt):
+    """Formatiert ein datetime als 'Wochentag, DD. Monat YYYY' auf Deutsch -
+    bewusst OHNE strftime('%A'/'%B'), da das von der System-Locale des
+    GitHub-Actions-Runners abhängt (dort standardmäßig Englisch: 'Tuesday'
+    statt 'Dienstag') statt einer Locale-Installation zu bedürfen."""
+    wochentag = WOCHENTAGE_DE[dt.weekday()]
+    monat = MONATE_DE[dt.month - 1]
+    return f"{wochentag}, {dt.day:02d}. {monat} {dt.year}"
+
+
 def formatiere_positionstrading(status):
     """Baut aus dem Ergebnis von berechne_positionstrading_status() einen
     lesbaren Text-Absatz - für Text- und HTML-Report gemeinsam genutzt.
     Erste Zeile ist IMMER das explizite Tages-Signal (KAUF/VERKAUF/HALTEN/
     KEIN SIGNAL), danach folgt die Begründung/der Kontext."""
+    def de_zahl(n, nachkomma=2, vorzeichen=False):
+        """Deutsches Zahlenformat (Punkt=Tausender, Komma=Dezimal) NUR für den
+        übergebenen Zahlenwert - wird gezielt pro Wert aufgerufen, nicht als
+        globales Text-Replace (das würde auch Datumsangaben wie '13.03.2026'
+        verfälschen, siehe frühere Version dieser Funktion)."""
+        praefix = "+" if vorzeichen and n >= 0 else ""
+        return f"{praefix}{n:,.{nachkomma}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
     if status["status"] == "keine_daten":
         return "SIGNAL: nicht verfügbar (zu wenig Datenhistorie)."
 
@@ -707,9 +730,9 @@ def formatiere_positionstrading(status):
                       2: "TP2 erreicht, Stop wird laufend nachgezogen"}[status["stufe"]]
         kontext = (
             f"Simulierte Position seit {status['einstieg_datum'].strftime('%d.%m.%Y')} OFFEN "
-            f"({status['haltedauer_tage']} Tage). Einstieg {status['einstieg']:,.2f} USD, "
-            f"aktuell {status['aktueller_kurs']:,.2f} USD ({status['unrealisiert_pct']:+.2f}% unrealisiert). "
-            f"Stop bei {status['stop']:,.2f} USD, TP1 {status['tp1']:,.2f} USD, TP2 {status['tp2']:,.2f} USD "
+            f"({status['haltedauer_tage']} Tage). Einstieg {de_zahl(status['einstieg'])} USD, "
+            f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
+            f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD, TP2 {de_zahl(status['tp2'])} USD "
             f"({stufe_text})."
         )
     else:
@@ -719,18 +742,18 @@ def formatiere_positionstrading(status):
             kontext = (
                 f"Keine offene Position{cooldown_text}. Letzter simulierter Trade: "
                 f"{letzter['einstieg_datum'].strftime('%d.%m.%Y')} bis {letzter['ausstieg_datum'].strftime('%d.%m.%Y')}, "
-                f"Ergebnis {letzter['ergebnis_pct']:+.2f}%."
+                f"Ergebnis {de_zahl(letzter['ergebnis_pct'], vorzeichen=True)}%."
             )
         else:
             kontext = f"Keine offene Position{cooldown_text}. Noch kein abgeschlossener Trade in der Historie."
 
-    return (signal_text + "\n" + kontext).replace(",", "X").replace(".", ",").replace("X", ".")
+    return signal_text + "\n" + kontext
 
 
 
 def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
-    heute = jetzt.strftime("%A, %d. %B %Y")
+    heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
     daten_zeit = daten["letzter_zeitpunkt"].astimezone(ZoneInfo("Europe/Berlin")).strftime("%d.%m. %H:%M")
     alter_minuten = (jetzt - daten["letzter_zeitpunkt"]).total_seconds() / 60
@@ -752,7 +775,7 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     text = f"""MINI DAILY: GOLD
-{heute} - Erstellt um {erstellt_zeit} - Kursdaten-Stand {daten_zeit}
+{heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
 VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
@@ -786,7 +809,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: yf
 
 def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
-    heute = jetzt.strftime("%A, %d. %B %Y")
+    heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
     daten_zeit = daten["letzter_zeitpunkt"].astimezone(ZoneInfo("Europe/Berlin")).strftime("%d.%m. %H:%M")
     alter_minuten = (jetzt - daten["letzter_zeitpunkt"]).total_seconds() / 60
@@ -813,7 +836,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     html = f"""
     <html><body style="background:#14110d;color:#ece6d9;font-family:monospace;padding:20px;">
     <h1 style="color:#e8b95c;font-family:serif;">Mini Daily: Gold</h1>
-    <p style="color:#a89d87;">{heute} · Erstellt um {erstellt_zeit} · Kursdaten-Stand {daten_zeit}</p>
+    <p style="color:#a89d87;">{heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr</p>
     {warnblock}
     <hr style="border-color:#3a3226;">
 
