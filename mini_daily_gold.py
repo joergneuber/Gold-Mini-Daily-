@@ -45,6 +45,15 @@ POSITIONSTRADING_TREND_FENSTER = 50
 POSITIONSTRADING_SWING_FENSTER = 10
 POSITIONSTRADING_COOLDOWN_TAGE = 3
 
+# "Neustart" der SIGNAL-ANZEIGE (nicht der Backtest-Kennzahlen!) ab diesem Datum,
+# auf Wunsch des Nutzers (05.08.2026): wir gehen davon aus, dass bis dahin kein
+# tatsächlicher Auftrag erteilt wurde. Eine Position, die die Simulation schon
+# VOR diesem Datum als eröffnet ansieht, wird für die SIGNAL-Zeile nicht mehr
+# als "aktuell offen" ausgewiesen, und ein abgeschlossener Trade davor nicht
+# mehr als "letzter Trade" gezeigt - auch wenn die Simulation selbst (für
+# korrekte Trend-/Referenzberechnung) weiterhin die volle Historie durchläuft.
+SIGNAL_NEUSTART_DATUM = pd.Timestamp("2026-08-05", tz="UTC")
+
 POSITIONSTRADING_REGELN_TEXT = (
     "Regeln: Nur Long. Trend positiv (Tages-Regression über 50 Handelstage) "
     "und Kurs berührt ein rollierendes 10-Tage-Tief, schließt aber wieder "
@@ -991,17 +1000,17 @@ SCHLUSSKURS (VORTAG)
 RUECKBLICK
 {rueckblick_text}
 
-POSITIONSTRADING-SIGNAL (Backtest V1e, Halteperiode Tage bis Wochen)
-{positionstrading_text}
-{POSITIONSTRADING_REGELN_TEXT}
-Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
-{positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
-
-RANGE-AUSBRUCH-SIGNAL (1h, Halteperiode Stunden bis Tage)
+RANGE-AUSBRUCH-SIGNAL (1h, Halteperiode Stunden bis Tage, gehört zum Intraday-Chart chart.png)
 {range_ausbruch_text}
 {RANGE_AUSBRUCH_REGELN_TEXT}
 Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
 {RANGE_AUSBRUCH_BACKTEST_TEXT}
+
+POSITIONSTRADING-SIGNAL (Backtest V1e, Halteperiode Tage bis Wochen, gehört zum Tageschart chart_tages.png)
+{positionstrading_text}
+{POSITIONSTRADING_REGELN_TEXT}
+Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+{positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
 
 ---
 Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Twelve Data (XAU/USD)
@@ -1063,28 +1072,24 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Intraday)</h3>
     <img src="cid:chart" style="max-width:100%;border:1px solid #3a3226;">
+    <p style="line-height:1.6;margin-top:10px;"><strong style="color:#e8b95c;">{range_ausbruch_text.split(chr(10), 1)[0]}</strong><br>{range_ausbruch_text.split(chr(10), 1)[1] if chr(10) in range_ausbruch_text else ''}</p>
+    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{RANGE_AUSBRUCH_REGELN_TEXT}</p>
+    <p style="color:#a89d87;font-size:10.5px;">
+    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+    {RANGE_AUSBRUCH_BACKTEST_TEXT}
+    </p>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Positionstrading-Basis)</h3>
     <img src="cid:chart_tages" style="max-width:100%;border:1px solid #3a3226;">
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (4 Monate)</h3>
-    <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Positionstrading-Signal (Backtest V1e)</h3>
-    <p style="line-height:1.6;"><strong style="color:#e8b95c;">{positionstrading_text.split(chr(10), 1)[0]}</strong><br>{positionstrading_text.split(chr(10), 1)[1] if chr(10) in positionstrading_text else ''}</p>
+    <p style="line-height:1.6;margin-top:10px;"><strong style="color:#e8b95c;">{positionstrading_text.split(chr(10), 1)[0]}</strong><br>{positionstrading_text.split(chr(10), 1)[1] if chr(10) in positionstrading_text else ''}</p>
     <p style="color:#a89d87;font-size:11px;line-height:1.5;">{POSITIONSTRADING_REGELN_TEXT}</p>
     <p style="color:#a89d87;font-size:10.5px;">
     Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
     {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
     </p>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Range-Ausbruch-Signal (1h)</h3>
-    <p style="line-height:1.6;"><strong style="color:#e8b95c;">{range_ausbruch_text.split(chr(10), 1)[0]}</strong><br>{range_ausbruch_text.split(chr(10), 1)[1] if chr(10) in range_ausbruch_text else ''}</p>
-    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{RANGE_AUSBRUCH_REGELN_TEXT}</p>
-    <p style="color:#a89d87;font-size:10.5px;">
-    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
-    {RANGE_AUSBRUCH_BACKTEST_TEXT}
-    </p>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (4 Monate)</h3>
+    <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
     Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: Twelve Data (XAU/USD)
@@ -1186,6 +1191,14 @@ def berechne_positionstrading_status():
     letzter_kurs = float(daily["Close"].iloc[-1])
     letztes_datum = daily.index[-1]
 
+    # Neustart-Regel (siehe SIGNAL_NEUSTART_DATUM oben): eine schon vor dem
+    # Stichtag eröffnete Position gilt für die Anzeige nicht mehr als offen,
+    # ein Trade davor nicht mehr als "letzter Trade".
+    if in_position and entry_datum < SIGNAL_NEUSTART_DATUM:
+        in_position = False
+    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_datum"] < SIGNAL_NEUSTART_DATUM:
+        letzter_abgeschlossener_trade = None
+
     if in_position:
         # War der EINSTIEG genau die letzte (heutige) Kerze -> heute ausgelöstes
         # Kaufsignal. Sonst: Position läuft bereits, heutiges Signal = Halten.
@@ -1278,6 +1291,14 @@ def berechne_range_ausbruch_status():
 
     letzter_kurs = float(stunden["Close"].iloc[-1])
     letzte_zeit = stunden.index[-1]
+
+    # Neustart-Regel (siehe SIGNAL_NEUSTART_DATUM oben): eine schon vor dem
+    # Stichtag eröffnete Position gilt für die Anzeige nicht mehr als offen,
+    # ein Trade davor nicht mehr als "letzter Trade".
+    if in_position and entry_zeit < SIGNAL_NEUSTART_DATUM:
+        in_position = False
+    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_zeit"] < SIGNAL_NEUSTART_DATUM:
+        letzter_abgeschlossener_trade = None
 
     if in_position:
         heutiges_signal = "KAUF" if entry_zeit == letzte_zeit else "HALTEN"
