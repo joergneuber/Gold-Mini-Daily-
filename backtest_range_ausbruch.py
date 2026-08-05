@@ -57,42 +57,54 @@ def hole_api_key():
     return key
 
 
-def hole_ausschnitt(api_key, start, ende):
-    antwort = requests.get(
-        TWELVEDATA_BASIS_URL,
-        params={
-            "symbol": SYMBOL, "interval": INTERVALL, "apikey": api_key,
-            "timezone": "UTC", "order": "ASC",
-            "start_date": start.isoformat(), "end_date": ende.isoformat(),
-            "outputsize": 5000,
-        },
-        timeout=20,
-    )
-    # Erst die JSON-Antwort auslesen, DANACH ggf. abbrechen - Twelve Data
-    # liefert bei "kein Zugriff auf diesen Zeitraum" (typisch bei Free/Basic-
-    # Tarifen für alte Intraday-Historie) HTTP 400 zusammen mit einer
-    # erklärenden Fehlermeldung im Body. raise_for_status() VOR dem Auslesen
-    # hätte diese Meldung nie gezeigt und das ganze Skript abgebrochen, statt
-    # nur diesen einen Ausschnitt zu überspringen.
-    try:
-        daten = antwort.json()
-    except ValueError:
-        antwort.raise_for_status()
-        raise RuntimeError(f"Unerwartete Antwort ohne JSON-Body: {antwort.text[:300]}")
+def hole_ausschnitt(api_key, start, ende, max_versuche=4):
+    """Holt einen Zeitausschnitt. Bei HTTP 429 (Rate-Limit) wird NICHT
+    aufgegeben, sondern bis zu max_versuche mal mit Wartezeit erneut
+    versucht - sonst gehen bei einem Tarif-Limit stillschweigend ganze
+    Zeiträume verloren (Befund 05.08.2026: 2 Jahre Historie fehlten dadurch)."""
+    for versuch in range(1, max_versuche + 1):
+        antwort = requests.get(
+            TWELVEDATA_BASIS_URL,
+            params={
+                "symbol": SYMBOL, "interval": INTERVALL, "apikey": api_key,
+                "timezone": "UTC", "order": "ASC",
+                "start_date": start.isoformat(), "end_date": ende.isoformat(),
+                "outputsize": 5000,
+            },
+            timeout=20,
+        )
+        # Erst die JSON-Antwort auslesen, DANACH ggf. abbrechen - Twelve Data
+        # liefert bei Fehlern (Rate-Limit, kein Zugriff auf den Zeitraum)
+        # trotzdem eine erklärende Nachricht im Body mit.
+        try:
+            daten = antwort.json()
+        except ValueError:
+            antwort.raise_for_status()
+            raise RuntimeError(f"Unerwartete Antwort ohne JSON-Body: {antwort.text[:300]}")
 
-    if antwort.status_code != 200 or daten.get("status") == "error":
-        print(f"  Kein Ausschnitt {start} bis {ende} (HTTP {antwort.status_code}): "
-              f"{daten.get('message', daten)}")
-        return pd.DataFrame()
-    if "values" not in daten:
-        return pd.DataFrame()
+        if antwort.status_code == 429:
+            wartezeit = 65
+            print(f"  Rate-Limit bei {start} bis {ende} (Versuch {versuch}/{max_versuche}) - "
+                  f"warte {wartezeit}s und versuche es erneut...")
+            time.sleep(wartezeit)
+            continue
 
-    df = pd.DataFrame(daten["values"])
-    df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
-    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
-    for spalte in ("Open", "High", "Low", "Close"):
-        df[spalte] = df[spalte].astype(float)
-    return df.set_index("Datum").sort_index()[["Open", "High", "Low", "Close"]]
+        if antwort.status_code != 200 or daten.get("status") == "error":
+            print(f"  Kein Ausschnitt {start} bis {ende} (HTTP {antwort.status_code}): "
+                  f"{daten.get('message', daten)}")
+            return pd.DataFrame()
+        if "values" not in daten:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(daten["values"])
+        df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+        for spalte in ("Open", "High", "Low", "Close"):
+            df[spalte] = df[spalte].astype(float)
+        return df.set_index("Datum").sort_index()[["Open", "High", "Low", "Close"]]
+
+    print(f"  Aufgegeben nach {max_versuche} Versuchen (weiter im Rate-Limit): {start} bis {ende}")
+    return pd.DataFrame()
 
 
 def hole_daten():
@@ -108,7 +120,7 @@ def hole_daten():
         if not teil.empty:
             teile.append(teil)
         fenster_start = fenster_ende + timedelta(days=1)
-        time.sleep(0.5)
+        time.sleep(8)  # unter 8 Credits/Minute bleiben (Tarif-Limit, siehe Log 05.08.2026)
 
     if not teile:
         raise RuntimeError("Keine Daten von Twelve Data erhalten - Tarif/Key prüfen.")
