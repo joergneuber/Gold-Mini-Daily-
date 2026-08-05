@@ -430,11 +430,19 @@ Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahm
 6-7 Sätzen - fasse dich pro Punkt knapp statt jeden Aspekt breit auszuführen.
 Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
 
-    try:
-        antwort = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
-        return antwort.text.strip()
-    except Exception as exc:
-        return f"(Rückblick-Generierung fehlgeschlagen: {exc})"
+    # Kurzer Retry: Gemini antwortet gelegentlich mit 503 (kurzzeitig überlastet,
+    # siehe Log 05.08.2026, 18:46 Uhr) - ein einzelner überlasteter Moment soll
+    # nicht gleich den ganzen Rückblick-Absatz leer lassen.
+    letzter_fehler = None
+    for versuch in range(1, 3):
+        try:
+            antwort = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+            return antwort.text.strip()
+        except Exception as exc:
+            letzter_fehler = exc
+            if versuch < 2:
+                time.sleep(15)
+    return f"(Rückblick-Generierung fehlgeschlagen nach 2 Versuchen: {letzter_fehler})"
 
 
 def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
