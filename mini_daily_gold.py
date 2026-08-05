@@ -15,6 +15,7 @@ genutzt) nur Tages-OHLC liefert, kein Intraday-Intervall.
 
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import matplotlib
@@ -92,29 +93,52 @@ def hole_twelvedata_key():
     return key
 
 
-def hole_zeitreihe(interval, outputsize=None, start_date=None, end_date=None):
+def hole_zeitreihe(interval, outputsize=None, start_date=None, end_date=None, max_versuche=4):
     """Holt eine OHLC-Zeitreihe für XAU/USD von Twelve Data und liefert sie als
     DataFrame mit DatetimeIndex (Spalten Open/High/Low/Close, aufsteigend
-    sortiert) - drop-in-Ersatz für die frühere yfinance-.history()-Nutzung."""
-    params = {
-        "symbol": TICKER,
-        "interval": interval,
-        "apikey": hole_twelvedata_key(),
-        "timezone": "UTC",
-        "order": "ASC",
-    }
-    if outputsize:
-        params["outputsize"] = outputsize
-    if start_date:
-        params["start_date"] = start_date
-    if end_date:
-        params["end_date"] = end_date
+    sortiert) - drop-in-Ersatz für die frühere yfinance-.history()-Nutzung.
 
-    antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=20)
-    antwort.raise_for_status()
-    daten = antwort.json()
-    if daten.get("status") == "error" or "values" not in daten:
-        raise RuntimeError(f"Twelve-Data-Fehler ({interval}): {daten}")
+    Bei HTTP 429 (Rate-Limit, 8 Credits/Minute auf diesem Tarif) wird bis zu
+    max_versuche mal mit Wartezeit erneut versucht statt sofort abzubrechen -
+    ein einzelner Report-Lauf braucht mittlerweile ~8-9 Anfragen (V1e- UND
+    Range-Ausbruch-Signal, drei Reaktionszonen-Fenster, Tages-/Intraday-Basis)
+    und lief deshalb ohne diese Behandlung gelegentlich ins Limit (Befund
+    05.08.2026, gleiches Problem wie zuvor schon im Backtest-Skript gelöst)."""
+    for versuch in range(1, max_versuche + 1):
+        params = {
+            "symbol": TICKER,
+            "interval": interval,
+            "apikey": hole_twelvedata_key(),
+            "timezone": "UTC",
+            "order": "ASC",
+        }
+        if outputsize:
+            params["outputsize"] = outputsize
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+
+        antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=20)
+        if antwort.status_code == 429:
+            wartezeit = 65
+            print(f"  Rate-Limit bei Twelve-Data-Anfrage ({interval}, Versuch {versuch}/{max_versuche}) - "
+                  f"warte {wartezeit}s und versuche es erneut...")
+            time.sleep(wartezeit)
+            continue
+
+        antwort.raise_for_status()
+        daten = antwort.json()
+        if daten.get("status") == "error" or "values" not in daten:
+            raise RuntimeError(f"Twelve-Data-Fehler ({interval}): {daten}")
+        break
+    else:
+        raise RuntimeError(f"Twelve-Data-Rate-Limit nach {max_versuche} Versuchen nicht überwunden ({interval}).")
+
+    # Kurze Pause NACH jeder erfolgreichen Anfrage: hält die ~8-9 Calls eines
+    # Report-Laufs unter 8 Credits/Minute, statt erst auf den Rate-Limit-Retry
+    # oben angewiesen zu sein (der kostet pro Treffer 65s statt hier 8s).
+    time.sleep(8)
 
     df = pd.DataFrame(daten["values"])
     df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
