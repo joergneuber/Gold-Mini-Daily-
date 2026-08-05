@@ -504,7 +504,7 @@ def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_tref
     return {"widerstandszonen": clustern(swing_highs), "supportzonen": clustern(swing_lows)}
 
 
-def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
+def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
     ax.set_facecolor("#14110d")
@@ -557,6 +557,16 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     puffer = (preise.max() - preise.min()) * 0.15
     y_unten = preise.min() - puffer
     y_oben = preise.max() + puffer
+
+    # Range-Ausbruch-Signal (1h): falls aktuell offen, zieht Einstieg/Stop/TP1/TP2
+    # die Achse mit auf, genau wie die Pivot-/Struktur-Level weiter unten - diese
+    # Marken können außerhalb des sichtbaren ~3-Tage-Fensters liegen, weil Positionen
+    # im Backtest im Schnitt 13 Tage laufen.
+    if range_ausbruch_status and range_ausbruch_status.get("status") == "offen":
+        for wert in (range_ausbruch_status["einstieg"], range_ausbruch_status["stop"],
+                     range_ausbruch_status["tp1"], range_ausbruch_status["tp2"]):
+            y_oben = max(y_oben, wert * 1.002)
+            y_unten = min(y_unten, wert * 0.998)
 
     # Nur die EINE wirklich nächstgelegene Marke pro Richtung zieht die Achse (egal ob
     # Pivot oder übergeordnetes Struktur-Level) - vorher zogen beide unabhängig
@@ -642,6 +652,24 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
+
+    # Range-Ausbruch-Signal (1h): Einstieg/Stop/TP1/TP2 einzeichnen, falls offen -
+    # "RA-"-Präfix in der Beschriftung, damit es nicht mit den Pivot-Widerstand/
+    # Support-Linien verwechselt wird, die dieselbe Farbpalette nutzen.
+    if range_ausbruch_status and range_ausbruch_status.get("status") == "offen":
+        ra = range_ausbruch_status
+        ax.axhline(ra["einstieg"], color="#c9c2b0", linewidth=1.0, linestyle=":", alpha=0.8)
+        ax.text(intraday_reihe.index[0], ra["einstieg"], "RA-Einstieg  ", color="#c9c2b0",
+                 fontsize=8, va="bottom", ha="right")
+        ax.axhline(ra["stop"], color="#d9534f", linewidth=1.2, linestyle="--", alpha=0.85)
+        ax.text(intraday_reihe.index[0], ra["stop"], f"RA-Stop {ra['stop']:,.0f}  ".replace(",", "."),
+                 color="#e8887a", fontsize=8, fontweight="bold", va="center", ha="right")
+        ax.axhline(ra["tp1"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.7)
+        ax.text(intraday_reihe.index[0], ra["tp1"], f"RA-TP1 {ra['tp1']:,.0f}  ".replace(",", "."),
+                 color="#9fcf8f", fontsize=7.5, va="center", ha="right")
+        ax.axhline(ra["tp2"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.5)
+        ax.text(intraday_reihe.index[0], ra["tp2"], f"RA-TP2 {ra['tp2']:,.0f}  ".replace(",", "."),
+                 color="#9fcf8f", fontsize=7.5, va="center", ha="right")
 
     # Feineres Gitter: Hauptlinien + gedämpfte Zwischenlinien für bessere Ablesbarkeit
     spanne = y_oben - y_unten
@@ -1280,16 +1308,18 @@ def main():
     kombinierte_zonen_lang = kombiniere_zonen(
         {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 4)}
     )
-    chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday)
+
+    range_ausbruch_status = berechne_range_ausbruch_status()
+    print(f"Range-Ausbruch-Status: {range_ausbruch_status['status']}")
+
+    chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday,
+                             range_ausbruch_status=range_ausbruch_status)
     chart_lang_pfad = None
     if daily_lang is not None:
         chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
 
     positionstrading_status = berechne_positionstrading_status()
     print(f"Positionstrading-Status: {positionstrading_status['status']}")
-
-    range_ausbruch_status = berechne_range_ausbruch_status()
-    print(f"Range-Ausbruch-Status: {range_ausbruch_status['status']}")
 
     # Für den neuen Tageschart reicht ein 12-Monats-Ausschnitt (genug für 50-Tage-
     # Trend + 10-Tage-Swing-Tief-Referenz, aber übersichtlicher als die vollen
