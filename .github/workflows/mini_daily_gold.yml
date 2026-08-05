@@ -21,6 +21,7 @@ jobs:
       - name: Report erzeugen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: python mini_daily_gold.py
 
       - name: Nach Google Drive hochladen
