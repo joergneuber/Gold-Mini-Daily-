@@ -25,7 +25,7 @@ from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 import requests
-import google.generativeai as genai
+from google import genai
 
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
@@ -249,6 +249,14 @@ def kombiniere_zonen(zonen_je_zeitraum, bucket_usd=30, top_n=6, referenz_preis=N
 
 
 def klassische_pivots(high, low, close):
+    """Klassische Pivots (P/R1-3/S1-3) aus Vortages-OHLC, plus eine vierte,
+    weiter entfernte Ebene (R4/S4, gängige Erweiterung: Abstand R2->R1 bzw.
+    S1->S2 nochmal auf R3/S3 draufgeschlagen). Ohne diese vierte Ebene wirkt
+    das Panel nach einem starken Ausbruch über R3/unter S3 "eingefroren" -
+    der Kurs läuft weiter, aber es gibt keine nächste Marke mehr zu zeigen,
+    weil R3/S3 die letzte feste Grenze der klassischen Formel sind (Befund
+    05.08.2026: Kurs lag deutlich über den Widerständen, die sich trotzdem
+    nicht mehr veränderten - kein Bug, sondern eine Grenze der 3-Ebenen-Formel)."""
     p = (high + low + close) / 3
     r1 = 2 * p - low
     s1 = 2 * p - high
@@ -256,7 +264,9 @@ def klassische_pivots(high, low, close):
     s2 = p - (high - low)
     r3 = high + 2 * (p - low)
     s3 = low - 2 * (high - p)
-    return {"p": p, "r": [r1, r2, r3], "s": [s1, s2, s3]}
+    r4 = r3 + (r2 - r1)
+    s4 = s3 - (s1 - s2)
+    return {"p": p, "r": [r1, r2, r3, r4], "s": [s1, s2, s3, s4]}
 
 
 def bestimme_tendenz(realtime, prev_close):
@@ -292,8 +302,7 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
     if not api_key:
         return "(Kein GEMINI_API_KEY gesetzt - Rückblick konnte nicht generiert werden.)"
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-flash-latest")
+    client = genai.Client(api_key=api_key)
 
     zonen_bloecke = []
     for monate in sorted(zonen_je_zeitraum.keys()):
@@ -318,7 +327,7 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
     saisonalitaet = hole_saisonalitaet_text()
     saison_block = f"\nSaisonaler Kontext (nur Hintergrundinfo, kein Signal): {saisonalitaet}\n" if saisonalitaet else ""
 
-    prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold (XAU/USD, Future GC=F).
+    prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold Spot (XAU/USD).
 Schreibe einen Rückblick-Absatz (genau 6-7 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
 
@@ -361,7 +370,7 @@ Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahm
 Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
 
     try:
-        antwort = model.generate_content(prompt)
+        antwort = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
         return antwort.text.strip()
     except Exception as exc:
         return f"(Rückblick-Generierung fehlgeschlagen: {exc})"
@@ -616,7 +625,7 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, pfad="chart.png"):
     ax.tick_params(colors="#a89d87", labelsize=10)
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
-    ax.set_title("Gold (GC=F) - Intraday", color="#ece6d9", fontsize=13, loc="left")
+    ax.set_title("Gold Spot (XAU/USD) - Intraday", color="#ece6d9", fontsize=13, loc="left")
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
     fig.tight_layout()
@@ -677,7 +686,7 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
     ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
-    ax.set_title("Gold (GC=F) - Tageschart (Positionstrading-Basis)", color="#ece6d9", fontsize=13, loc="left")
+    ax.set_title("Gold Spot (XAU/USD) - Tageschart (Positionstrading-Basis)", color="#ece6d9", fontsize=13, loc="left")
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
     fig.tight_layout()
@@ -741,7 +750,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
     ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
-    ax.set_title("Gold (GC=F) - 4 Monate, strukturelle Reaktionszonen", color="#ece6d9",
+    ax.set_title("Gold Spot (XAU/USD) - 4 Monate, strukturelle Reaktionszonen", color="#ece6d9",
                  fontsize=13, loc="left")
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
