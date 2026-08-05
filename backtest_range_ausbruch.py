@@ -68,13 +68,21 @@ def hole_ausschnitt(api_key, start, ende):
         },
         timeout=20,
     )
-    antwort.raise_for_status()
-    daten = antwort.json()
-    if daten.get("status") == "error":
-        # "no data"-Fehler sind bei sehr alten Zeitfenstern normal, wenn der
-        # Tarif so weit nicht zurückreicht - dann einfach leer zurückgeben
-        # statt das ganze Skript abzubrechen.
-        print(f"  Kein Ausschnitt {start} bis {ende}: {daten.get('message', daten)}")
+    # Erst die JSON-Antwort auslesen, DANACH ggf. abbrechen - Twelve Data
+    # liefert bei "kein Zugriff auf diesen Zeitraum" (typisch bei Free/Basic-
+    # Tarifen für alte Intraday-Historie) HTTP 400 zusammen mit einer
+    # erklärenden Fehlermeldung im Body. raise_for_status() VOR dem Auslesen
+    # hätte diese Meldung nie gezeigt und das ganze Skript abgebrochen, statt
+    # nur diesen einen Ausschnitt zu überspringen.
+    try:
+        daten = antwort.json()
+    except ValueError:
+        antwort.raise_for_status()
+        raise RuntimeError(f"Unerwartete Antwort ohne JSON-Body: {antwort.text[:300]}")
+
+    if antwort.status_code != 200 or daten.get("status") == "error":
+        print(f"  Kein Ausschnitt {start} bis {ende} (HTTP {antwort.status_code}): "
+              f"{daten.get('message', daten)}")
         return pd.DataFrame()
     if "values" not in daten:
         return pd.DataFrame()
