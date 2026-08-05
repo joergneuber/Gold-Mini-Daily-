@@ -32,12 +32,13 @@ INTRADAY_INTERVALL = "1h"
 TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
-# Positionstrading-Signal (Backtest V1e, per Rückblick im Gespräch bestätigt:
+# Positionstrading-Signal (Backtest V1e, ursprünglich auf GC=F-Future kalibriert:
 # 34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%). Läuft bei JEDEM
 # Report-Lauf komplett neu von POSITIONSTRADING_START an durch, um den
-# aktuellen Stand zu ermitteln - kein gespeicherter Zustand zwischen den
-# Läufen nötig, da die Simulation deterministisch aus den historischen
-# Kursdaten reproduzierbar ist.
+# aktuellen Stand UND die aktuellen Backtest-Kennzahlen auf den echten
+# Spot-Daten zu ermitteln (siehe backtest_kennzahlen_text() weiter unten) -
+# kein gespeicherter Zustand zwischen den Läufen nötig, da die Simulation
+# deterministisch aus den historischen Kursdaten reproduzierbar ist.
 POSITIONSTRADING_START = "2019-01-01"
 POSITIONSTRADING_TREND_FENSTER = 50
 POSITIONSTRADING_SWING_FENSTER = 10
@@ -872,7 +873,7 @@ POSITIONSTRADING-SIGNAL (Backtest V1e, Halteperiode Tage bis Wochen)
 {positionstrading_text}
 {POSITIONSTRADING_REGELN_TEXT}
 Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
-(34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%).
+{positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
 
 ---
 Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Twelve Data (XAU/USD)
@@ -945,7 +946,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <p style="color:#a89d87;font-size:11px;line-height:1.5;">{POSITIONSTRADING_REGELN_TEXT}</p>
     <p style="color:#a89d87;font-size:10.5px;">
     Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
-    (34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%).
+    {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
     </p>
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
@@ -991,6 +992,7 @@ def berechne_positionstrading_status():
     entry_datum = None
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
+    alle_trades = []  # sammelt jeden abgeschlossenen Trade für die Live-Backtest-Kennzahlen im Footer
 
     for datum, bar in daily.iterrows():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
@@ -1020,6 +1022,7 @@ def berechne_positionstrading_status():
                     "einstieg_datum": entry_datum, "ausstieg_datum": datum,
                     "ergebnis_pct": (stop - entry) / entry * 100,
                 }
+                alle_trades.append(letzter_abgeschlossener_trade["ergebnis_pct"])
                 in_position = False
                 cooldown_bis = datum + pd.Timedelta(days=POSITIONSTRADING_COOLDOWN_TAGE)
             elif stufe < 2 and hoch >= tp2:
@@ -1028,6 +1031,20 @@ def berechne_positionstrading_status():
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
+
+    def backtest_kennzahlen_text():
+        """Baut den Footer-Satz live aus alle_trades statt aus einer fest
+        einprogrammierten Zahl - die stammte zuletzt noch vom alten
+        GC=F-Future-Backtest und war nach der Umstellung auf Spot (05.08.2026)
+        falsch (zeigte Future-Kennzahlen für ein Spot-Signal)."""
+        if not alle_trades:
+            return f"(Keine abgeschlossenen Trades seit {POSITIONSTRADING_START} in dieser Simulation.)"
+        n = len(alle_trades)
+        gewinner = [t for t in alle_trades if t > 0]
+        trefferquote = len(gewinner) / n * 100
+        summe = sum(alle_trades)
+        return (f"{n} Trades seit {POSITIONSTRADING_START[:4]}, Trefferquote {trefferquote:.0f}%, "
+                f"Summe {summe:+.2f}% (auf Spot-Daten/XAU-USD, live bei jedem Lauf neu simuliert).")
 
     letzter_kurs = float(daily["Close"].iloc[-1])
     letztes_datum = daily.index[-1]
@@ -1044,6 +1061,7 @@ def berechne_positionstrading_status():
             "aktueller_kurs": letzter_kurs,
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_tage": (letztes_datum - entry_datum).days,
+            "backtest_kennzahlen": backtest_kennzahlen_text(),
         }
     else:
         # War der AUSSTIEG (Stop) genau die letzte (heutige) Kerze -> heute
@@ -1056,6 +1074,7 @@ def berechne_positionstrading_status():
             "signal": heutiges_signal,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
+            "backtest_kennzahlen": backtest_kennzahlen_text(),
         }
 
 
