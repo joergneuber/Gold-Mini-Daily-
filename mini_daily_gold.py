@@ -6,7 +6,11 @@ lässt einen kurzen Rückblick-Text von Gemini generieren, baut einen Tageschart
 und erzeugt daraus einen HTML-Report. Der Report wird anschließend (in main.py-
 Aufrufern bzw. separaten Schritten) nach Google Drive hochgeladen und per Mail verschickt.
 
-Datenquelle: yfinance (GC=F, Gold-Future). Kein API-Key nötig.
+Datenquelle: Twelve Data (XAU/USD, Spot Gold). Erfordert TWELVEDATA_API_KEY.
+Vorher yfinance/GC=F (Gold-Future) - Umstellung auf Spot + 1h-Intraday am
+05.08.2026, weil yfinance keinen zuverlässigen Spot-Ticker bietet
+(XAUUSD=X / XAU=X liefern 404) und APIFreaks (bereits fürs Backtest-Projekt
+genutzt) nur Tages-OHLC liefert, kein Intraday-Intervall.
 """
 
 import os
@@ -20,12 +24,12 @@ import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
 import google.generativeai as genai
 
-TICKER = "GC=F"  # Gold-Future. Yahoo/yfinance bietet keinen zuverlässig abrufbaren
-                  # Spot-Ticker (XAUUSD=X / XAU=X liefern 404) - GC=F liegt fast immer
-                  # nur wenige USD neben dem echten Spot-Kurs.
+TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
+INTRADAY_INTERVALL = "1h"
+TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
 # Positionstrading-Signal (Backtest V1e, per Rückblick im Gespräch bestätigt:
@@ -49,36 +53,99 @@ POSITIONSTRADING_REGELN_TEXT = (
 )
 
 
-def hole_kursdaten():
-    """Liefert Realtime-Kurs, Vortages-OHLC und eine Intraday-Kursreihe für den Chart."""
-    ticker = yf.Ticker(TICKER)
+def hole_twelvedata_key():
+    key = os.environ.get("TWELVEDATA_API_KEY")
+    if not key:
+        raise EnvironmentError(
+            "TWELVEDATA_API_KEY nicht gesetzt. Key aus dem Gold-Briefing-Setup "
+            "wiederverwenden oder unter https://twelvedata.com neu anlegen und "
+            "als GitHub Secret hinterlegen."
+        )
+    return key
 
-    # Intraday-Reihe (5-Min, letzte 2 Tage) - liefert auch den aktuellsten Kurs
-    intraday = ticker.history(period="2d", interval="5m")
+
+def hole_zeitreihe(interval, outputsize=None, start_date=None, end_date=None):
+    """Holt eine OHLC-Zeitreihe für XAU/USD von Twelve Data und liefert sie als
+    DataFrame mit DatetimeIndex (Spalten Open/High/Low/Close, aufsteigend
+    sortiert) - drop-in-Ersatz für die frühere yfinance-.history()-Nutzung."""
+    params = {
+        "symbol": TICKER,
+        "interval": interval,
+        "apikey": hole_twelvedata_key(),
+        "timezone": "UTC",
+        "order": "ASC",
+    }
+    if outputsize:
+        params["outputsize"] = outputsize
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+
+    antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=20)
+    antwort.raise_for_status()
+    daten = antwort.json()
+    if daten.get("status") == "error" or "values" not in daten:
+        raise RuntimeError(f"Twelve-Data-Fehler ({interval}): {daten}")
+
+    df = pd.DataFrame(daten["values"])
+    df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
+    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+    for spalte in ("Open", "High", "Low", "Close"):
+        df[spalte] = df[spalte].astype(float)
+    return df.set_index("Datum").sort_index()[["Open", "High", "Low", "Close"]]
+
+
+def hole_zeitreihe_taeglich(outputsize=None, start_date=None, end_date=None):
+    """Wie hole_zeitreihe(), aber für Tagesdaten und mit Wochenend-Filter:
+    Twelve Datas Tages-Feed für XAU/USD kann - analog zum Befund im
+    Backtest-Projekt bei APIFreaks - Sa/So-Zeilen mit unplausibel breiter
+    Range enthalten. Die Positionstrading-Regeln (10-Tage-Swing-Tief,
+    50-Tage-Trend) wurden auf einer reinen Mo-Fr-Zeitreihe kalibriert
+    (GC=F-Future), deshalb werden Wochenend-Zeilen hier sicherheitshalber
+    konsequent rausgefiltert."""
+    df = hole_zeitreihe("1day", outputsize=outputsize, start_date=start_date, end_date=end_date)
+    vor_filter = len(df)
+    df = df[df.index.dayofweek < 5]
+    entfernt = vor_filter - len(df)
+    if entfernt:
+        print(f"Wochenend-Zeilen entfernt: {entfernt} von {vor_filter}")
+    return df
+
+
+def hole_kursdaten():
+    """Liefert Realtime-Kurs, Vortages-OHLC und eine Intraday-Kursreihe (1h) für den Chart."""
+    intraday = hole_zeitreihe(INTRADAY_INTERVALL, outputsize=72)  # ~3 Tage Puffer bei 1h
     if intraday.empty:
-        raise RuntimeError("Keine Intraday-Daten von yfinance erhalten (GC=F).")
+        raise RuntimeError("Keine Intraday-Daten von Twelve Data erhalten (XAU/USD).")
 
     realtime = float(intraday["Close"].iloc[-1])
     letzter_zeitpunkt = intraday.index[-1]
 
-    # yfinance liefert über fast_info oft einen aktuelleren Live-Quote als die
-    # 5-Min-Historie (die manchmal mehrere Stunden nachhinkt). Bleibt dieselbe
-    # Quelle (GC=F) - kein Wechsel auf Spot/andere Anbieter, also kein
-    # Konsistenzproblem zwischen Pivots und Realtime-Wert.
+    # Twelve Data liefert über /price oft einen aktuelleren Live-Quote als die
+    # 1h-Historie (deren letzte Kerze bis zu einer Stunde nachhinken kann).
+    # Bleibt dieselbe Quelle (XAU/USD) - kein Konsistenzproblem zwischen
+    # Pivots und Realtime-Wert.
     try:
-        live_preis = float(ticker.fast_info["last_price"])
+        preis_antwort = requests.get(
+            "https://api.twelvedata.com/price",
+            params={"symbol": TICKER, "apikey": hole_twelvedata_key()},
+            timeout=10,
+        )
+        preis_antwort.raise_for_status()
+        live_preis = float(preis_antwort.json()["price"])
         if live_preis and live_preis > 0:
             realtime = live_preis
     except Exception as exc:
-        print(f"fast_info nicht verfügbar, nutze 5-Min-Historie als Realtime-Wert ({exc}).")
+        print(f"/price nicht verfügbar, nutze 1h-Historie als Realtime-Wert ({exc}).")
 
-    alter_minuten = (pd.Timestamp.now(tz=letzter_zeitpunkt.tz) - letzter_zeitpunkt).total_seconds() / 60
+    alter_minuten = (pd.Timestamp.now(tz="UTC") - letzter_zeitpunkt).total_seconds() / 60
     if alter_minuten > 120:
         print(f"WARNUNG: Letzte Intraday-Kerze ist {alter_minuten:.0f} Minuten alt "
-              f"({letzter_zeitpunkt}) - yfinance liefert aktuell verzögerte Daten für GC=F.")
+              f"({letzter_zeitpunkt}) - Twelve Data liefert aktuell verzögerte Daten für XAU/USD.")
 
     # Tages-Reihe für Vortages-OHLC (Pivot-Basis)
-    daily = ticker.history(period="5d", interval="1d")
+    daily = hole_zeitreihe_taeglich(outputsize=5)
     if len(daily) < 2:
         raise RuntimeError("Nicht genug Tagesdaten für Pivot-Berechnung.")
 
@@ -99,12 +166,9 @@ def hole_kursdaten():
 
 def hole_langfrist_daten(monate=36):
     """Tageskurse der letzten `monate` Monate für die Reaktionszonen-Analyse
-    (separat von den Intraday-Daten, die für Pivots/Chart genutzt werden).
-    yfinance kennt keinen festen period-Code für beliebige Monatszahlen,
-    daher wird das Startdatum explizit berechnet."""
-    ticker = yf.Ticker(TICKER)
+    (separat von den Intraday-Daten, die für Pivots/Chart genutzt werden)."""
     start = (pd.Timestamp.now() - pd.DateOffset(months=monate)).strftime("%Y-%m-%d")
-    daily = ticker.history(start=start, interval="1d")
+    daily = hole_zeitreihe_taeglich(start_date=start, outputsize=5000)
     if len(daily) < 60:
         return None
     return daily
@@ -762,7 +826,7 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
     if alter_minuten > 120:
         warnzeile = (
             f"\n⚠ HINWEIS: Die letzte verfügbare Kursdaten-Kerze ist {alter_minuten / 60:.1f} Stunden alt "
-            f"({daten_zeit}) - yfinance liefert gerade verzögerte Daten für GC=F. Der Realtime-Kurs oben "
+            f"({daten_zeit}) - Twelve Data liefert gerade verzögerte Daten für XAU/USD. Der Realtime-Kurs oben "
             f"kann trotzdem aktueller sein (separate Live-Quote), Pivot-/Chart-Basis ist aber diese Kerze.\n"
         )
 
@@ -802,7 +866,7 @@ Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
 (34 Trades 2019-2026, Trefferquote 38%, Summe +49,77%).
 
 ---
-Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: yfinance
+Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Twelve Data (XAU/USD)
 """
     return text
 
@@ -819,7 +883,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         warnblock = f"""
     <p style="background:#3a2a1a;border-left:3px solid #d9a441;padding:10px 14px;color:#e8c98a;font-size:12.5px;">
     ⚠ Die letzte verfügbare Kursdaten-Kerze ist {alter_minuten / 60:.1f} Stunden alt ({daten_zeit}) -
-    yfinance liefert gerade verzögerte Daten für GC=F. Der Realtime-Kurs unten kann trotzdem aktueller
+    Twelve Data liefert gerade verzögerte Daten für XAU/USD. Der Realtime-Kurs unten kann trotzdem aktueller
     sein (separate Live-Quote), Pivot-/Chart-Basis ist aber diese Kerze.
     </p>"""
 
@@ -876,7 +940,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </p>
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
-    Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: yfinance
+    Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: Twelve Data (XAU/USD)
     </p>
     </body></html>
     """
@@ -900,8 +964,7 @@ def berechne_positionstrading_status():
     Rein informativ - siehe Disclaimer im Report. Kein automatisiertes
     Handelssignal, keine Anlageempfehlung.
     """
-    ticker = yf.Ticker(TICKER)
-    daily = ticker.history(start=POSITIONSTRADING_START, interval="1d").sort_index()
+    daily = hole_zeitreihe_taeglich(start_date=POSITIONSTRADING_START, outputsize=5000)
     if len(daily) < POSITIONSTRADING_TREND_FENSTER + 5:
         return {"status": "keine_daten"}
 
