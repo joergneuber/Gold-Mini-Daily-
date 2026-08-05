@@ -53,6 +53,33 @@ POSITIONSTRADING_REGELN_TEXT = (
     "3 Handelstage Cooldown ohne neuen Einstieg."
 )
 
+# Range-Ausbruch-Signal (Backtest 05.08.2026 auf XAU/USD 1h, Twelve Data:
+# 144 Trades 24.01.2020-05.08.2026, Trefferquote 32,6%, Summe +110,82%,
+# siehe backtest_range_ausbruch.py). Anders als beim V1e-Signal NICHT bei
+# jedem Lauf über die volle Historie neu simuliert - das würde bei
+# Stundenkerzen wegen des Twelve-Data-Rate-Limits (8 Credits/Minute) viele
+# Chunk-Anfragen und mehrere Minuten pro Lauf kosten, 6x täglich unnötig.
+# Stattdessen: RANGE_AUSBRUCH_HISTORIE_TAGE deckt die durchschnittliche
+# Backtest-Haltedauer (13,3 Tage) mit reichlich Puffer ab und passt in EINE
+# einzige Anfrage (max. ~208 Tage bei 1h-Kerzen/outputsize 5000). Die
+# Backtest-Kennzahlen selbst sind deshalb ein Snapshot vom 05.08.2026, kein
+# live nachgerechneter Wert - bei einem erneuten vollständigen Backtest-Lauf
+# hier von Hand nachziehen.
+RANGE_AUSBRUCH_FENSTER = 24  # Stunden-Kerzen für die Range-Hoch/-Tief-Referenz
+RANGE_AUSBRUCH_COOLDOWN_STUNDEN = 12
+RANGE_AUSBRUCH_HISTORIE_TAGE = 200
+RANGE_AUSBRUCH_BACKTEST_TEXT = (
+    "144 Trades 24.01.2020-05.08.2026, Trefferquote 32,6%, Summe +110,82% "
+    "(Backtest-Snapshot vom 05.08.2026, XAU/USD 1h - nicht laufend neu berechnet)."
+)
+RANGE_AUSBRUCH_REGELN_TEXT = (
+    "Regeln: Nur Long. Schlusskurs bricht über das rollierende 24h-Hoch aus "
+    "(bestätigter Close, kein reiner Docht) -> KAUF. Stop = 24h-Tief zum "
+    "Einstiegszeitpunkt. TP1/TP2 = 2R/3R: TP1 erreicht -> Stop auf Breakeven, "
+    "TP2 erreicht -> Stop auf TP1, danach kontinuierlich am 24h-Tief "
+    "nachgezogen. Stop erreicht -> VERKAUF, danach 12 Stunden Cooldown."
+)
+
 
 def hole_twelvedata_key():
     key = os.environ.get("TWELVEDATA_API_KEY")
@@ -824,8 +851,50 @@ def formatiere_positionstrading(status):
     return signal_text + "\n" + kontext
 
 
+def formatiere_range_ausbruch(status):
+    """Wie formatiere_positionstrading(), aber für das Range-Ausbruch-Signal
+    (Stunden statt Tage als Zeiteinheit)."""
+    def de_zahl(n, nachkomma=2, vorzeichen=False):
+        praefix = "+" if vorzeichen and n >= 0 else ""
+        return f"{praefix}{n:,.{nachkomma}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status):
+    if status["status"] == "keine_daten":
+        return "SIGNAL: nicht verfügbar (zu wenig Datenhistorie)."
+
+    signal_text = {
+        "KAUF": "SIGNAL: KAUF - heute ausgelöst",
+        "VERKAUF": "SIGNAL: VERKAUF - heute ausgelöst (Stop erreicht)",
+        "HALTEN": "SIGNAL: HALTEN - Position bereits offen, kein neues Ereignis heute",
+        "KEIN_SIGNAL": "SIGNAL: KEIN SIGNAL - keine offene Position, kein neuer Einstieg heute",
+    }[status["signal"]]
+
+    if status["status"] == "offen":
+        stufe_text = {0: "noch kein Ziel erreicht", 1: "TP1 erreicht, Stop auf Breakeven",
+                      2: "TP2 erreicht, Stop wird laufend nachgezogen"}[status["stufe"]]
+        kontext = (
+            f"Simulierte Position seit {status['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC OFFEN "
+            f"({status['haltedauer_stunden']:.0f} Std.). Einstieg {de_zahl(status['einstieg'])} USD, "
+            f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
+            f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD, TP2 {de_zahl(status['tp2'])} USD "
+            f"({stufe_text})."
+        )
+    else:
+        letzter = status.get("letzter_trade")
+        cooldown_text = " (aktuell in Cooldown nach Stop)" if status.get("im_cooldown") else ""
+        if letzter:
+            kontext = (
+                f"Keine offene Position{cooldown_text}. Letzter simulierter Trade: "
+                f"{letzter['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} bis {letzter['ausstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC, "
+                f"Ergebnis {de_zahl(letzter['ergebnis_pct'], vorzeichen=True)}%."
+            )
+        else:
+            kontext = f"Keine offene Position{cooldown_text}. Noch kein abgeschlossener Trade im betrachteten Zeitraum."
+
+    return signal_text + "\n" + kontext
+
+
+
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -841,6 +910,7 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
         )
 
     positionstrading_text = formatiere_positionstrading(positionstrading_status)
+    range_ausbruch_text = formatiere_range_ausbruch(range_ausbruch_status)
 
     def liste(werte):
         return " / ".join(f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") for v in werte)
@@ -875,13 +945,19 @@ POSITIONSTRADING-SIGNAL (Backtest V1e, Halteperiode Tage bis Wochen)
 Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
 {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
 
+RANGE-AUSBRUCH-SIGNAL (1h, Halteperiode Stunden bis Tage)
+{range_ausbruch_text}
+{RANGE_AUSBRUCH_REGELN_TEXT}
+Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+{RANGE_AUSBRUCH_BACKTEST_TEXT}
+
 ---
 Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Twelve Data (XAU/USD)
 """
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -898,6 +974,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </p>"""
 
     positionstrading_text = formatiere_positionstrading(positionstrading_status)
+    range_ausbruch_text = formatiere_range_ausbruch(range_ausbruch_status)
 
     def level_liste(werte, farbe):
         return "".join(
@@ -947,6 +1024,14 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <p style="color:#a89d87;font-size:10.5px;">
     Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
     {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
+    </p>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Range-Ausbruch-Signal (1h)</h3>
+    <p style="line-height:1.6;"><strong style="color:#e8b95c;">{range_ausbruch_text.split(chr(10), 1)[0]}</strong><br>{range_ausbruch_text.split(chr(10), 1)[1] if chr(10) in range_ausbruch_text else ''}</p>
+    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{RANGE_AUSBRUCH_REGELN_TEXT}</p>
+    <p style="color:#a89d87;font-size:10.5px;">
+    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+    {RANGE_AUSBRUCH_BACKTEST_TEXT}
     </p>
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
@@ -1078,6 +1163,93 @@ def berechne_positionstrading_status():
         }
 
 
+def berechne_range_ausbruch_status():
+    """Simuliert das Range-Ausbruch-Signal (1h, rollierendes 24h-Hoch/-Tief,
+    TP1/TP2=2R/3R analog zum V1e-System) über die letzten
+    RANGE_AUSBRUCH_HISTORIE_TAGE Tage und liefert den aktuellen Stand -
+    holt dafür genau EINE zusätzliche Twelve-Data-Anfrage (siehe Kommentar
+    bei den RANGE_AUSBRUCH_*-Konstanten weiter oben, warum nicht die volle
+    Historie wie beim V1e-Signal).
+
+    Rein informativ - siehe Disclaimer im Report. Kein automatisiertes
+    Handelssignal, keine Anlageempfehlung.
+    """
+    start = (pd.Timestamp.now() - pd.Timedelta(days=RANGE_AUSBRUCH_HISTORIE_TAGE)).strftime("%Y-%m-%d")
+    stunden = hole_zeitreihe(INTRADAY_INTERVALL, start_date=start, outputsize=5000)
+    if len(stunden) < RANGE_AUSBRUCH_FENSTER + 5:
+        return {"status": "keine_daten"}
+
+    range_hoch_referenz = stunden["High"].rolling(RANGE_AUSBRUCH_FENSTER).max().shift(1)
+    range_tief_referenz = stunden["Low"].rolling(RANGE_AUSBRUCH_FENSTER).min().shift(1)
+
+    in_position = False
+    entry = stop = tp1 = tp2 = None
+    stufe = 0
+    entry_zeit = None
+    cooldown_bis = None
+    letzter_abgeschlossener_trade = None
+
+    for zeit, bar in stunden.iterrows():
+        hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+        ref_hoch = range_hoch_referenz.get(zeit)
+        ref_tief = range_tief_referenz.get(zeit)
+
+        if not in_position:
+            if cooldown_bis is not None and zeit < cooldown_bis:
+                continue
+            if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch):
+                entry = schluss
+                stop = float(ref_tief)
+                if stop < entry:
+                    r = entry - stop
+                    tp1 = entry + 2 * r
+                    tp2 = entry + 3 * r
+                    in_position = True
+                    stufe = 0
+                    entry_zeit = zeit
+        else:
+            if stufe == 2 and pd.notna(ref_tief):
+                stop = max(stop, float(ref_tief))
+            if tief <= stop:
+                letzter_abgeschlossener_trade = {
+                    "einstieg_zeit": entry_zeit, "ausstieg_zeit": zeit,
+                    "ergebnis_pct": (stop - entry) / entry * 100,
+                }
+                in_position = False
+                cooldown_bis = zeit + pd.Timedelta(hours=RANGE_AUSBRUCH_COOLDOWN_STUNDEN)
+            elif stufe < 2 and hoch >= tp2:
+                stufe = 2
+                stop = max(stop, tp1)
+            elif stufe < 1 and hoch >= tp1:
+                stufe = 1
+                stop = max(stop, entry)
+
+    letzter_kurs = float(stunden["Close"].iloc[-1])
+    letzte_zeit = stunden.index[-1]
+
+    if in_position:
+        heutiges_signal = "KAUF" if entry_zeit == letzte_zeit else "HALTEN"
+        return {
+            "status": "offen",
+            "signal": heutiges_signal,
+            "einstieg_zeit": entry_zeit, "einstieg": entry,
+            "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe,
+            "aktueller_kurs": letzter_kurs,
+            "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
+            "haltedauer_stunden": (letzte_zeit - entry_zeit).total_seconds() / 3600,
+        }
+    else:
+        heutiges_signal = "VERKAUF"
+        if not (letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_zeit"] == letzte_zeit):
+            heutiges_signal = "KEIN_SIGNAL"
+        return {
+            "status": "keine_position",
+            "signal": heutiges_signal,
+            "letzter_trade": letzter_abgeschlossener_trade,
+            "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
+        }
+
+
 def main():
     daten = hole_kursdaten()
     pivots = klassische_pivots(daten["prev_high"], daten["prev_low"], daten["prev_close"])
@@ -1116,6 +1288,9 @@ def main():
     positionstrading_status = berechne_positionstrading_status()
     print(f"Positionstrading-Status: {positionstrading_status['status']}")
 
+    range_ausbruch_status = berechne_range_ausbruch_status()
+    print(f"Range-Ausbruch-Status: {range_ausbruch_status['status']}")
+
     # Für den neuen Tageschart reicht ein 12-Monats-Ausschnitt (genug für 50-Tage-
     # Trend + 10-Tage-Swing-Tief-Referenz, aber übersichtlicher als die vollen
     # ~7 Jahre, die für das Positionstrading-Signal selbst durchgerechnet werden).
@@ -1124,8 +1299,8 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status)
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
