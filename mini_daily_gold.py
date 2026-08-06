@@ -95,6 +95,35 @@ def berechne_volatilitaets_erlaubt(daten, fenster_kurz, fenster_lang, schwelle=V
     return ((atr_kurz / atr_lang) <= schwelle).shift(1)
 
 
+def berechne_trend_schwelle(bekannte_schluesse, fenster):
+    """Löst algebraisch, bei welchem hypothetischen NÄCHSTEN Schlusskurs die
+    rollierende `fenster`-Tage-Regressionssteigung genau auf 0 kippen würde -
+    der Schwellenwert, ab dem der V1e-Trendfilter von 'nicht erfüllt' auf
+    'erfüllt' umschaltet. `bekannte_schluesse`: die letzten (fenster-1)
+    bekannten Schlusskurse (chronologisch aufsteigend); der gesuchte Wert wäre
+    der (fenster)-te, also der nächste noch unbekannte Schlusskurs.
+
+    Funktioniert, weil die OLS-Steigung linear vom letzten Punkt abhängt, wenn
+    die übrigen (fenster-1) Punkte fest bleiben - deshalb reichen zwei
+    Stützpunkte (v0, v1) und eine lineare Interpolation auf Steigung=0, statt
+    für viele Kandidatenpreise die Regression neu zu rechnen."""
+    if len(bekannte_schluesse) != fenster - 1:
+        return None
+    x = np.arange(fenster)
+
+    def steigung_mit_letztem(v):
+        y = np.concatenate([bekannte_schluesse, [v]])
+        m, _ = np.polyfit(x, y, 1)
+        return m
+
+    v0 = float(bekannte_schluesse[-1])
+    v1 = v0 * 1.05 if v0 else v0 + 100.0  # zweiter Stützpunkt, +5% reicht für die lineare Interpolation
+    m0, m1 = steigung_mit_letztem(v0), steigung_mit_letztem(v1)
+    if m1 == m0:
+        return None
+    return v0 - m0 * (v1 - v0) / (m1 - m0)
+
+
 def volatilitaets_filter_text(fenster_kurz, fenster_lang):
     if VOLATILITAETS_FILTER_AKTIV:
         return (f" Zusätzlicher Volatilitätsfilter AKTIV: kein neuer Einstieg, wenn ATR({fenster_kurz}) "
@@ -1028,6 +1057,15 @@ def formatiere_vorschau(status, fmt):
     )
     if vorschau.get("trend_erfuellt") is False:
         zeile += ". Trendbedingung aktuell NICHT erfüllt - Vorschau daher rein illustrativ, kein gültiges Setup."
+        if vorschau.get("trend_schwelle") is not None:
+            zeile += (
+                f" Trendfilter würde auf 'erfüllt' umschalten, sobald der nächste Schlusskurs "
+                f"ca. {fmt(vorschau['trend_schwelle'])} USD erreicht (exakter Schwellenwert der "
+                f"50-Tage-Regressionssteigung, kein Näherungswert)"
+            )
+            if vorschau.get("sma_aktuell") is not None:
+                zeile += f"; zum Vergleich der einfachere 50-Tage-Durchschnitt: {fmt(vorschau['sma_aktuell'])} USD"
+            zeile += "."
     return zeile
 
 
@@ -1460,6 +1498,14 @@ def berechne_positionstrading_status():
                     "tp2": letzter_kurs + 3 * r,
                     "trend_erfuellt": bool(trend_aktuell) if pd.notna(trend_aktuell) else None,
                 }
+                # Trendbedingung aktuell nicht erfüllt: zusätzlich den Schwellenwert
+                # ausrechnen, ab dem der Trendfilter kippen würde (siehe
+                # berechne_trend_schwelle) - beantwortet direkt "ab welchem
+                # Kursniveau schaltet der Filter wieder auf grün".
+                if vorschau["trend_erfuellt"] is False:
+                    letzte_49 = daily["Close"].iloc[-(POSITIONSTRADING_TREND_FENSTER - 1):].to_numpy()
+                    vorschau["trend_schwelle"] = berechne_trend_schwelle(letzte_49, POSITIONSTRADING_TREND_FENSTER)
+                    vorschau["sma_aktuell"] = float(daily["Close"].iloc[-POSITIONSTRADING_TREND_FENSTER:].mean())
 
         return {
             "status": "keine_position",
