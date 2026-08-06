@@ -423,9 +423,16 @@ def hole_saisonalitaet_text():
     return None
 
 
-def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
+def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
-    zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}."""
+    zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}.
+    szenarien: Ergebnis von berechne_szenarien() - wird dem Prompt als FESTE Trigger-
+    Marken vorgegeben, damit der Rückblick-Text dieselben Zahlen nennt wie der
+    SZENARIEN-Block im Report. Vorher leitete Gemini eigene Trigger aus dem
+    Intraday-Hoch/-Tief her, unabhängig vom Pivot-basierten Szenarien-Block - das
+    führte zu zwei unterschiedlichen Zahlen für denselben Ausbruchspunkt im selben
+    Report (Befund 06.08.2026: Rückblick nannte 4.295,87 USD als Aufwärts-Trigger,
+    der Szenarien-Block 4.320,79 USD)."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return "(Kein GEMINI_API_KEY gesetzt - Rückblick konnte nicht generiert werden.)"
@@ -455,6 +462,18 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum):
     saisonalitaet = hole_saisonalitaet_text()
     saison_block = f"\nSaisonaler Kontext (nur Hintergrundinfo, kein Signal): {saisonalitaet}\n" if saisonalitaet else ""
 
+    szenarien_block = "Bereits festgelegte Szenario-Marken (aus den Pivots abgeleitet, im Report separat als eigener Block gezeigt - NICHT selbst neu herleiten, sondern genau diese Zahlen im Text verwenden):\n"
+    if szenarien["naechster_widerstand"] is not None:
+        szenarien_block += f"- Aufwärts-Trigger: Ausbruch über {szenarien['naechster_widerstand']:.2f} USD"
+        if szenarien["ziel_bullisch"] is not None:
+            szenarien_block += f", Ziel danach {szenarien['ziel_bullisch']:.2f} USD"
+        szenarien_block += "\n"
+    if szenarien["naechster_support"] is not None:
+        szenarien_block += f"- Abwärts-Trigger: Bruch unter {szenarien['naechster_support']:.2f} USD"
+        if szenarien["ziel_baerisch"] is not None:
+            szenarien_block += f", Ziel danach {szenarien['ziel_baerisch']:.2f} USD"
+        szenarien_block += "\n"
+
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold Spot (XAU/USD).
 Schreibe einen Rückblick-Absatz (genau 6-7 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
@@ -469,19 +488,20 @@ Intraday-Daten (kurzfristig):
 - Vorbörsliche Tendenz: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
+
+{szenarien_block}
 {saison_block}
 Strukturelle Reaktionszonen (mehrfach bestätigte Hoch-/Tiefpunkte je Zeitfenster - diese
 sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Pivots; kürzere
 Fenster zeigen eher aktuell relevante Zonen, längere Fenster eher übergeordnete Struktur):
 {zonen_block}
 
-Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken. Benenne dabei
-EXPLIZIT zwei konkrete Kursszenarien für den Intraday-Horizont:
-1. Aufwärtsszenario: welcher Trigger-Kurs einen Ausbruch nach oben auslösen würde und
-   welches Kursziel/welche Widerstandsmarke danach als nächstes relevant wird
-2. Abwärtsszenario: welcher Trigger-Kurs eine Trendwende/Korrektur nach unten auslösen
-   würde und welches Kursziel/welche Unterstützungsmarke danach als nächstes relevant wird
-Nenne in beiden Szenarien konkrete Kurswerte aus den Daten oben, keine vagen Formulierungen.
+Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken. Nenne dabei EXPLIZIT
+die beiden oben vorgegebenen Szenario-Marken (Aufwärts-Trigger und Abwärts-Trigger samt
+ihrer jeweiligen Ziele) in eigenen Worten eingebettet in den Fließtext - erfinde KEINE
+eigenen abweichenden Trigger-Kurse (z.B. nicht das reine Intraday-Hoch/-Tief als Trigger
+verwenden), auch wenn die Intraday-Hoch/-Tief-Werte oben als zusätzlicher Kontext
+mitgegeben werden.
 
 Ordne die Kursbewegung anschließend, gestützt auf die Reaktionszonen der verschiedenen
 Zeitfenster (falls vorhanden - bevorzuge dabei das kürzeste Fenster mit brauchbaren
@@ -498,9 +518,10 @@ Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahm
 Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert.
 
 Schließe den Absatz mit exakt zwei Sätzen ab, die explizit mit "Fazit:" beginnen und die
-Lage auf den Punkt bringen (z.B. welcher Trend aktuell überwiegt und welcher der beiden
-oben genannten Trigger-Kurse als Nächstes wahrscheinlicher greift) - diese zwei Sätze
-zählen mit zum 6-7-Sätze-Rahmen, sind kein zusätzlicher Absatz."""
+Lage auf den Punkt bringen (welcher Trend aktuell überwiegt und ob der Aufwärts- oder der
+Abwärts-Trigger aus den oben vorgegebenen Szenario-Marken kurzfristig wahrscheinlicher
+zuerst erreicht wird) - diese zwei Sätze zählen mit zum 6-7-Sätze-Rahmen, sind kein
+zusätzlicher Absatz."""
 
     # Kurzer Retry: Gemini antwortet gelegentlich mit 503 (kurzzeitig überlastet,
     # siehe Log 05.08.2026, 18:46 Uhr) - ein einzelner überlasteter Moment soll
@@ -978,6 +999,38 @@ def formatiere_crv(status, fmt):
     return f"Ziel1 {crv1:.1f} / Ziel2 {crv2:.1f}"
 
 
+def formatiere_vorschau(status, fmt):
+    """Vorschau auf Stop/Einstieg/TP1/TP2/CRV, wenn AKTUELL keine Position
+    offen ist - beantwortet 'wie sähe ein Trade aus, falls das System gleich
+    triggert'. Der Stop (bzw. bei Range-Ausbruch auch der Einstieg) ist ein
+    exakter, schon jetzt bekannter Wert; bei V1e ist der Einstieg selbst nur
+    eine Näherung auf Basis des aktuellen Kurses, weil der echte Trigger
+    einen Bounce mit vorher unbekanntem Schlusskurs braucht (siehe
+    einstieg_praezise-Flag)."""
+    vorschau = status.get("vorschau")
+    if not vorschau:
+        return None
+    risiko = vorschau["hypothetischer_einstieg"] - vorschau["stop"]
+    if risiko <= 0:
+        return None
+    crv1 = (vorschau["tp1"] - vorschau["hypothetischer_einstieg"]) / risiko
+    crv2 = (vorschau["tp2"] - vorschau["hypothetischer_einstieg"]) / risiko
+    if vorschau.get("einstieg_praezise"):
+        einstieg_label = f"{fmt(vorschau['hypothetischer_einstieg'])} USD (exakter künftiger Trigger, kein Näherungswert)"
+    else:
+        einstieg_label = (
+            f"nahe {fmt(vorschau['hypothetischer_einstieg'])} USD (Näherung auf Basis des aktuellen Kurses - "
+            f"der tatsächliche künftige Einstieg beim Bounce kann abweichen)"
+        )
+    zeile = (
+        f"Vorschau (kein aktives Signal): Einstieg {einstieg_label}, Stop {fmt(vorschau['stop'])} USD, "
+        f"TP1 {fmt(vorschau['tp1'])} USD (CRV {crv1:.1f}), TP2 {fmt(vorschau['tp2'])} USD (CRV {crv2:.1f})"
+    )
+    if vorschau.get("trend_erfuellt") is False:
+        zeile += ". Trendbedingung aktuell NICHT erfüllt - Vorschau daher rein illustrativ, kein gültiges Setup."
+    return zeile
+
+
 def formatiere_positionstrading(status):
     """Baut aus dem Ergebnis von berechne_positionstrading_status() einen
     lesbaren Text-Absatz - für Text- und HTML-Report gemeinsam genutzt.
@@ -1027,6 +1080,10 @@ def formatiere_positionstrading(status):
     if crv_text:
         kontext += f"\nCRV: {crv_text}"
 
+    vorschau_text = formatiere_vorschau(status, de_zahl)
+    if vorschau_text:
+        kontext += f"\n{vorschau_text}"
+
     return signal_text + "\n" + kontext
 
 
@@ -1072,6 +1129,10 @@ def formatiere_range_ausbruch(status):
     crv_text = formatiere_crv(status, de_zahl)
     if crv_text:
         kontext += f"\nCRV: {crv_text}"
+
+    vorschau_text = formatiere_vorschau(status, de_zahl)
+    if vorschau_text:
+        kontext += f"\n{vorschau_text}"
 
     return signal_text + "\n" + kontext
 
@@ -1377,12 +1438,36 @@ def berechne_positionstrading_status():
         heutiges_signal = "VERKAUF"
         if not (letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_datum"] == letztes_datum):
             heutiges_signal = "KEIN_SIGNAL"
+
+        # Vorschau, falls gerade keine Position offen ist: der STOP ist exakt
+        # bekannt (aktuelles 10-Tage-Tief), der EINSTIEG dagegen nicht - der
+        # echte Trigger braucht einen Bounce (Berührung + Schluss darüber),
+        # dessen genauer Schlusskurs vorher unbekannt ist. Als Näherung dient
+        # der aktuelle Kurs als Platzhalter-Einstieg - klar als Näherung
+        # gekennzeichnet, nicht als tatsächlicher künftiger Preis.
+        vorschau = None
+        ref_tief_aktuell = swing_tief_referenz.get(letztes_datum)
+        trend_aktuell = aufwaertstrend.get(letztes_datum)
+        if pd.notna(ref_tief_aktuell):
+            ref_tief_aktuell = float(ref_tief_aktuell)
+            if ref_tief_aktuell < letzter_kurs:
+                r = letzter_kurs - ref_tief_aktuell
+                vorschau = {
+                    "stop": ref_tief_aktuell,
+                    "stop_praezise": True,
+                    "hypothetischer_einstieg": letzter_kurs,
+                    "tp1": letzter_kurs + 2 * r,
+                    "tp2": letzter_kurs + 3 * r,
+                    "trend_erfuellt": bool(trend_aktuell) if pd.notna(trend_aktuell) else None,
+                }
+
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
+            "vorschau": vorschau,
         }
 
 
@@ -1475,11 +1560,34 @@ def berechne_range_ausbruch_status():
         heutiges_signal = "VERKAUF"
         if not (letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_zeit"] == letzte_zeit):
             heutiges_signal = "KEIN_SIGNAL"
+
+        # Vorschau, falls gerade keine Position offen ist: hier ist - anders als
+        # bei V1e - auch der EINSTIEG exakt bekannt, nicht nur der Stop: das
+        # aktuelle rollierende 24h-Hoch IST der künftige Trigger-Kurs selbst
+        # (ein bestätigter Schluss darüber löst genau dort aus), kein
+        # Näherungswert wie beim Swing-Tief-Bounce-System.
+        vorschau = None
+        ref_hoch_aktuell = range_hoch_referenz.get(letzte_zeit)
+        ref_tief_aktuell = range_tief_referenz.get(letzte_zeit)
+        if pd.notna(ref_hoch_aktuell) and pd.notna(ref_tief_aktuell):
+            ref_hoch_aktuell = float(ref_hoch_aktuell)
+            ref_tief_aktuell = float(ref_tief_aktuell)
+            if ref_tief_aktuell < ref_hoch_aktuell:
+                r = ref_hoch_aktuell - ref_tief_aktuell
+                vorschau = {
+                    "stop": ref_tief_aktuell,
+                    "hypothetischer_einstieg": ref_hoch_aktuell,
+                    "einstieg_praezise": True,
+                    "tp1": ref_hoch_aktuell + 2 * r,
+                    "tp2": ref_hoch_aktuell + 3 * r,
+                }
+
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
+            "vorschau": vorschau,
         }
 
 
@@ -1501,7 +1609,8 @@ def main():
         else:
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
-    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum)
+    szenarien = berechne_szenarien(daten["realtime"], pivots)
+    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien)
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
