@@ -378,6 +378,25 @@ def klassische_pivots(high, low, close):
     return {"p": p, "r": [r1, r2, r3, r4], "s": [s1, s2, s3, s4]}
 
 
+def berechne_szenarien(realtime, pivots):
+    """Leitet aus den acht vorhandenen Pivot-Leveln (klassische_pivots) eine
+    priorisierte Szenario-Einordnung ab: Bullisch (über dem nächsten
+    Widerstand, mit Ziel am übernächsten Level), Neutral (dazwischen),
+    Bärisch (unter dem nächsten Support, mit Ziel am übernächsten Level).
+    Keine neue Berechnung, keine neue Datenquelle - reine Neuanordnung dessen,
+    was die Pivot-Funktion schon liefert, zugespitzt auf 'was als Nächstes
+    passieren müsste' statt einer flachen Liste von acht Einzelwerten."""
+    alle_level = sorted(pivots["r"] + pivots["s"])
+    ueber = [w for w in alle_level if w > realtime]
+    unter = [w for w in alle_level if w < realtime]
+    return {
+        "naechster_widerstand": ueber[0] if ueber else None,
+        "ziel_bullisch": ueber[1] if len(ueber) > 1 else None,
+        "naechster_support": unter[-1] if unter else None,
+        "ziel_baerisch": unter[-2] if len(unter) > 1 else None,
+    }
+
+
 def bestimme_tendenz(realtime, prev_close):
     pct = (realtime - prev_close) / prev_close * 100
     if pct > SEITWAERTS_SCHWELLE_PROZENT:
@@ -476,7 +495,12 @@ spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
 
 Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahmen von
 6-7 Sätzen - fasse dich pro Punkt knapp statt jeden Aspekt breit auszuführen.
-Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert."""
+Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert.
+
+Schließe den Absatz mit exakt zwei Sätzen ab, die explizit mit "Fazit:" beginnen und die
+Lage auf den Punkt bringen (z.B. welcher Trend aktuell überwiegt und welcher der beiden
+oben genannten Trigger-Kurse als Nächstes wahrscheinlicher greift) - diese zwei Sätze
+zählen mit zum 6-7-Sätze-Rahmen, sind kein zusätzlicher Absatz."""
 
     # Kurzer Retry: Gemini antwortet gelegentlich mit 503 (kurzzeitig überlastet,
     # siehe Log 05.08.2026, 18:46 Uhr) - ein einzelner überlasteter Moment soll
@@ -920,6 +944,40 @@ def deutsches_datum(dt):
     return f"{wochentag}, {dt.day:02d}. {monat} {dt.year}"
 
 
+def formatiere_szenarien(szenarien, fmt):
+    """fmt: deutsche Zahlenformatierungsfunktion, z.B. lambda n: f'{n:,.2f}'...
+    Ampel-Darstellung (🟢/🟡/🔴), funktioniert unverändert in Text- und
+    HTML-Version (E-Mail-Clients stellen die Emoji normalerweise dar)."""
+    zeilen = []
+    if szenarien["naechster_widerstand"] is not None:
+        ziel = f" -> Ziel {fmt(szenarien['ziel_bullisch'])} USD" if szenarien["ziel_bullisch"] is not None else ""
+        zeilen.append(f"🟢 BULLISCH über {fmt(szenarien['naechster_widerstand'])} USD{ziel}")
+    if szenarien["naechster_support"] is not None and szenarien["naechster_widerstand"] is not None:
+        zeilen.append(
+            f"🟡 NEUTRAL zwischen {fmt(szenarien['naechster_support'])} und "
+            f"{fmt(szenarien['naechster_widerstand'])} USD -> abwarten"
+        )
+    if szenarien["naechster_support"] is not None:
+        ziel = f" -> Ziel {fmt(szenarien['ziel_baerisch'])} USD" if szenarien["ziel_baerisch"] is not None else ""
+        zeilen.append(f"🔴 BÄRISCH unter {fmt(szenarien['naechster_support'])} USD{ziel}")
+    return "\n".join(zeilen)
+
+
+def formatiere_crv(status, fmt):
+    """CRV (Chance-Risiko-Verhältnis) für TP1 und TP2, nur wenn eine Position
+    offen ist - nutzt exakt die Einstieg/Stop/TP1/TP2-Werte, die die
+    Simulation ohnehin schon berechnet hat (die selbst schon an anderer
+    Stelle im Text stehen, hier nur das CRV daraus, keine Wiederholung)."""
+    if status.get("status") != "offen":
+        return None
+    risiko = status["einstieg"] - status["stop"]
+    if risiko <= 0:
+        return None
+    crv1 = (status["tp1"] - status["einstieg"]) / risiko
+    crv2 = (status["tp2"] - status["einstieg"]) / risiko
+    return f"Ziel1 {crv1:.1f} / Ziel2 {crv2:.1f}"
+
+
 def formatiere_positionstrading(status):
     """Baut aus dem Ergebnis von berechne_positionstrading_status() einen
     lesbaren Text-Absatz - für Text- und HTML-Report gemeinsam genutzt.
@@ -965,6 +1023,10 @@ def formatiere_positionstrading(status):
         else:
             kontext = f"Keine offene Position{cooldown_text}. Noch kein abgeschlossener Trade in der Historie."
 
+    crv_text = formatiere_crv(status, de_zahl)
+    if crv_text:
+        kontext += f"\nCRV: {crv_text}"
+
     return signal_text + "\n" + kontext
 
 
@@ -1007,6 +1069,10 @@ def formatiere_range_ausbruch(status):
         else:
             kontext = f"Keine offene Position{cooldown_text}. Noch kein abgeschlossener Trade im betrachteten Zeitraum."
 
+    crv_text = formatiere_crv(status, de_zahl)
+    if crv_text:
+        kontext += f"\nCRV: {crv_text}"
+
     return signal_text + "\n" + kontext
 
 
@@ -1035,11 +1101,17 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
     def fmt(n):
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+    szenarien = berechne_szenarien(daten["realtime"], pivots)
+    szenarien_text = formatiere_szenarien(szenarien, fmt)
+
     text = f"""MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
 VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
+
+SZENARIEN
+{szenarien_text}
 
 WIDERSTAENDE (INTRADAY)
 {liste(pivots['r'])} USD
@@ -1093,6 +1165,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     positionstrading_text = formatiere_positionstrading(positionstrading_status)
     range_ausbruch_text = formatiere_range_ausbruch(range_ausbruch_status)
 
+    def fmt(n):
+        return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
     def level_liste(werte, farbe):
         return "".join(
             f'<span style="display:inline-block;background:#241f16;border-left:3px solid {farbe};'
@@ -1100,6 +1175,28 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
             f'{v:,.2f}</span>'.replace(",", "X").replace(".", ",").replace("X", ".")
             for v in werte
         )
+
+    szenarien = berechne_szenarien(daten["realtime"], pivots)
+
+    def szenario_zeile(emoji, label, farbe, hintergrund, bedingung, ziel):
+        return (
+            f'<p style="background:{hintergrund};border-left:3px solid {farbe};padding:8px 14px;'
+            f'margin:4px 0;">{emoji} <strong>{label}</strong> {bedingung}{ziel}</p>'
+        )
+
+    szenarien_html = ""
+    if szenarien["naechster_widerstand"] is not None:
+        ziel = f" → Ziel {fmt(szenarien['ziel_bullisch'])} USD" if szenarien["ziel_bullisch"] is not None else ""
+        szenarien_html += szenario_zeile("🟢", "BULLISCH", "#5cb85c", "#1a2e1a",
+                                          f"über {fmt(szenarien['naechster_widerstand'])} USD", ziel)
+    if szenarien["naechster_support"] is not None and szenarien["naechster_widerstand"] is not None:
+        szenarien_html += szenario_zeile("🟡", "NEUTRAL", "#d9a441", "#2e2a1a",
+                                          f"zwischen {fmt(szenarien['naechster_support'])} und "
+                                          f"{fmt(szenarien['naechster_widerstand'])} USD", " → abwarten")
+    if szenarien["naechster_support"] is not None:
+        ziel = f" → Ziel {fmt(szenarien['ziel_baerisch'])} USD" if szenarien["ziel_baerisch"] is not None else ""
+        szenarien_html += szenario_zeile("🔴", "BÄRISCH", "#d9534f", "#2e1a1a",
+                                          f"unter {fmt(szenarien['naechster_support'])} USD", ziel)
 
     html = f"""
     <html><body style="background:#14110d;color:#ece6d9;font-family:monospace;padding:20px;">
@@ -1110,6 +1207,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
     <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
+    {szenarien_html}
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Widerstände (Intraday)</h3>
     <div>{level_liste(pivots['r'], '#b5654f')}</div>
