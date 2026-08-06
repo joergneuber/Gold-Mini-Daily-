@@ -54,6 +54,54 @@ POSITIONSTRADING_COOLDOWN_TAGE = 3
 # korrekte Trend-/Referenzberechnung) weiterhin die volle Historie durchläuft.
 SIGNAL_NEUSTART_DATUM = pd.Timestamp("2026-08-05", tz="UTC")
 
+# Volatilitätsfilter (05.08.2026, Sicherheitsnetz für V1e UND Range-Ausbruch):
+# beide bestehenden Signale sind Trendfolge-/Ausbruchssysteme und kaufen in
+# eine laufende Bewegung hinein - in ungewöhnlich chaotischen/volatilen Phasen
+# ist die Gefahr von Fehlausbrüchen (Stop kurz nach Einstieg) erhöht. Der
+# Filter blockiert deshalb NEUE Einstiege (bestehende offene Positionen laufen
+# unverändert weiter), wenn die kurzfristige Volatilität (ATR) deutlich über
+# dem langfristigen Schnitt liegt. Default AUS, bis der Effekt gegen echte
+# Historie verglichen wurde (siehe backtest_*.py, dort derselbe Schalter) -
+# auf True setzen, um live zu aktivieren.
+VOLATILITAETS_FILTER_AKTIV = False
+VOLATILITAETS_SCHWELLE = 1.8  # ATR(kurz) darf max. das X-fache von ATR(lang) sein
+VOLATILITAETS_FENSTER_KURZ_TAGE = 14
+VOLATILITAETS_FENSTER_LANG_TAGE = 100
+VOLATILITAETS_FENSTER_KURZ_STUNDEN = 14
+VOLATILITAETS_FENSTER_LANG_STUNDEN = 200
+
+
+def berechne_atr(daten, fenster):
+    """Average True Range über `fenster` Perioden - berücksichtigt auch
+    Kurslücken zwischen den Perioden (nicht nur Hoch-Tief-Spanne). Nur mit
+    Vergangenheitsdaten (Vortagesschluss via .shift(1)), kein Lookahead."""
+    hoch, tief, schluss_vorperiode = daten["High"], daten["Low"], daten["Close"].shift(1)
+    true_range = pd.concat([
+        hoch - tief,
+        (hoch - schluss_vorperiode).abs(),
+        (tief - schluss_vorperiode).abs(),
+    ], axis=1).max(axis=1)
+    return true_range.rolling(fenster).mean()
+
+
+def berechne_volatilitaets_erlaubt(daten, fenster_kurz, fenster_lang, schwelle=VOLATILITAETS_SCHWELLE):
+    """True = Volatilität im normalen Bereich, neue Einstiege erlaubt.
+    False = ATR(kurz) liegt mehr als `schwelle`-mal über ATR(lang) - Markt
+    wirkt aktuell ungewöhnlich chaotisch für ein neues Setup. Ergebnis ist
+    bereits um eine Periode verschoben (nur bis zur Vorperiode bekannt,
+    kein Lookahead)."""
+    atr_kurz = berechne_atr(daten, fenster_kurz)
+    atr_lang = berechne_atr(daten, fenster_lang)
+    return ((atr_kurz / atr_lang) <= schwelle).shift(1)
+
+
+def volatilitaets_filter_text(fenster_kurz, fenster_lang):
+    if VOLATILITAETS_FILTER_AKTIV:
+        return (f" Zusätzlicher Volatilitätsfilter AKTIV: kein neuer Einstieg, wenn ATR({fenster_kurz}) "
+                f"mehr als das {VOLATILITAETS_SCHWELLE:.1f}-fache von ATR({fenster_lang}) beträgt.")
+    return " Volatilitätsfilter aktuell AUS (Konstante VOLATILITAETS_FILTER_AKTIV im Code)."
+
+
 POSITIONSTRADING_REGELN_TEXT = (
     "Regeln: Nur Long. Trend positiv (Tages-Regression über 50 Handelstage) "
     "und Kurs berührt ein rollierendes 10-Tage-Tief, schließt aber wieder "
@@ -61,7 +109,7 @@ POSITIONSTRADING_REGELN_TEXT = (
     "TP1 erreicht -> Stop auf Breakeven, TP2 erreicht -> Stop auf TP1, danach "
     "täglich am 10-Tage-Tief nachgezogen. Stop erreicht -> VERKAUF, danach "
     "3 Handelstage Cooldown ohne neuen Einstieg."
-)
+) + volatilitaets_filter_text(VOLATILITAETS_FENSTER_KURZ_TAGE, VOLATILITAETS_FENSTER_LANG_TAGE)
 
 # Range-Ausbruch-Signal (Backtest 05.08.2026 auf XAU/USD 1h, Twelve Data:
 # 144 Trades 24.01.2020-05.08.2026, Trefferquote 32,6%, Summe +110,82%,
@@ -88,7 +136,7 @@ RANGE_AUSBRUCH_REGELN_TEXT = (
     "Einstiegszeitpunkt. TP1/TP2 = 2R/3R: TP1 erreicht -> Stop auf Breakeven, "
     "TP2 erreicht -> Stop auf TP1, danach kontinuierlich am 24h-Tief "
     "nachgezogen. Stop erreicht -> VERKAUF, danach 12 Stunden Cooldown."
-)
+) + volatilitaets_filter_text(VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
 
 
 def hole_twelvedata_key():
@@ -1135,6 +1183,7 @@ def berechne_positionstrading_status():
 
     aufwaertstrend = daily["Close"].rolling(POSITIONSTRADING_TREND_FENSTER).apply(steigung, raw=True).shift(1) > 0
     swing_tief_referenz = daily["Low"].rolling(POSITIONSTRADING_SWING_FENSTER).min().shift(1)
+    vola_erlaubt = berechne_volatilitaets_erlaubt(daily, VOLATILITAETS_FENSTER_KURZ_TAGE, VOLATILITAETS_FENSTER_LANG_TAGE)
 
     in_position = False
     entry = stop = tp1 = tp2 = None
@@ -1148,11 +1197,12 @@ def berechne_positionstrading_status():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
         trend_auf = aufwaertstrend.get(datum)
         ref_tief = swing_tief_referenz.get(datum)
+        vola_ok = (not VOLATILITAETS_FILTER_AKTIV) or bool(vola_erlaubt.get(datum, False))
 
         if not in_position:
             if cooldown_bis is not None and datum < cooldown_bis:
                 continue
-            if pd.notna(trend_auf) and trend_auf and pd.notna(ref_tief):
+            if pd.notna(trend_auf) and trend_auf and pd.notna(ref_tief) and vola_ok:
                 ref_tief = float(ref_tief)
                 if tief <= ref_tief and schluss > ref_tief:
                     entry = schluss
@@ -1254,6 +1304,7 @@ def berechne_range_ausbruch_status():
 
     range_hoch_referenz = stunden["High"].rolling(RANGE_AUSBRUCH_FENSTER).max().shift(1)
     range_tief_referenz = stunden["Low"].rolling(RANGE_AUSBRUCH_FENSTER).min().shift(1)
+    vola_erlaubt = berechne_volatilitaets_erlaubt(stunden, VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
 
     in_position = False
     entry = stop = tp1 = tp2 = None
@@ -1266,11 +1317,12 @@ def berechne_range_ausbruch_status():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
         ref_hoch = range_hoch_referenz.get(zeit)
         ref_tief = range_tief_referenz.get(zeit)
+        vola_ok = (not VOLATILITAETS_FILTER_AKTIV) or bool(vola_erlaubt.get(zeit, False))
 
         if not in_position:
             if cooldown_bis is not None and zeit < cooldown_bis:
                 continue
-            if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch):
+            if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch) and vola_ok:
                 entry = schluss
                 stop = float(ref_tief)
                 if stop < entry:
