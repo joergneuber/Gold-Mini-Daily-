@@ -124,6 +124,31 @@ def berechne_trend_schwelle(bekannte_schluesse, fenster):
     return v0 - m0 * (v1 - v0) / (m1 - m0)
 
 
+def berechne_tage_bis_trendwechsel(bekannte_schluesse, fenster, angenommener_kurs, max_tage=None):
+    """Wie viele weitere Handelstage bei angenommen GLEICHBLEIBENDEM Kurs
+    vergehen müssten, bis die 50-Tage-Regressionssteigung positiv wird - weil
+    ältere, stärker fallende Tage nach und nach aus dem rollierenden Fenster
+    rausrutschen. Meist aussagekräftiger als berechne_trend_schwelle(): ein
+    einzelner künftiger Tag hat bei einem 50-Punkte-Fenster nur begrenzten
+    Hebel auf die Gesamtsteigung (Gewicht ca. (fenster-1)/2 geteilt durch die
+    Varianz der x-Werte) - wenn die übrigen 49 Tage noch einen kräftigen
+    Abwärtstrend zeigen, kann der rechnerische Schwellenwert für EINEN Tag
+    unrealistisch weit vom aktuellen Kurs liegen (Befund 06.08.2026: 6.153 USD
+    bei einem aktuellen Kurs von ca. 4.250 USD). Gibt None zurück, falls der
+    Trend auch nach max_tage (Default: `fenster`) noch nicht dreht - dann
+    reicht reines Abwarten nicht, der Kurs müsste tatsächlich steigen."""
+    if max_tage is None:
+        max_tage = fenster
+    fenster_werte = list(bekannte_schluesse[-fenster:])
+    x = np.arange(fenster)
+    for tag in range(1, max_tage + 1):
+        fenster_werte = fenster_werte[1:] + [angenommener_kurs]
+        m, _ = np.polyfit(x, fenster_werte, 1)
+        if m > 0:
+            return tag
+    return None
+
+
 def volatilitaets_filter_text(fenster_kurz, fenster_lang):
     if VOLATILITAETS_FILTER_AKTIV:
         return (f" Zusätzlicher Volatilitätsfilter AKTIV: kein neuer Einstieg, wenn ATR({fenster_kurz}) "
@@ -1057,15 +1082,25 @@ def formatiere_vorschau(status, fmt):
     )
     if vorschau.get("trend_erfuellt") is False:
         zeile += ". Trendbedingung aktuell NICHT erfüllt - Vorschau daher rein illustrativ, kein gültiges Setup."
+        tage = vorschau.get("tage_bis_trendwechsel")
+        if tage is not None:
+            zeile += (
+                f" Bei etwa gleichbleibendem Kurs würde der Trendfilter in ca. {tage} Handelstagen "
+                f"'erfüllt' zeigen, weil ältere, stärker fallende Tage aus dem 50-Tage-Fenster rausrutschen"
+            )
+        else:
+            zeile += (
+                " Bei gleichbleibendem Kurs bleibt der Trendfilter auch mittelfristig unerfüllt - "
+                "dafür müsste der Kurs tatsächlich steigen, reines Abwarten reicht nicht"
+            )
         if vorschau.get("trend_schwelle") is not None:
             zeile += (
-                f" Trendfilter würde auf 'erfüllt' umschalten, sobald der nächste Schlusskurs "
-                f"ca. {fmt(vorschau['trend_schwelle'])} USD erreicht (exakter Schwellenwert der "
-                f"50-Tage-Regressionssteigung, kein Näherungswert)"
+                f"; alternativ würde ein einzelner Schlusskurs von ca. {fmt(vorschau['trend_schwelle'])} USD "
+                f"denselben Effekt sofort auslösen"
             )
-            if vorschau.get("sma_aktuell") is not None:
-                zeile += f"; zum Vergleich der einfachere 50-Tage-Durchschnitt: {fmt(vorschau['sma_aktuell'])} USD"
-            zeile += "."
+        if vorschau.get("sma_aktuell") is not None:
+            zeile += f". Zum Vergleich der einfachere 50-Tage-Durchschnitt: {fmt(vorschau['sma_aktuell'])} USD"
+        zeile += "."
     return zeile
 
 
@@ -1498,14 +1533,24 @@ def berechne_positionstrading_status():
                     "tp2": letzter_kurs + 3 * r,
                     "trend_erfuellt": bool(trend_aktuell) if pd.notna(trend_aktuell) else None,
                 }
-                # Trendbedingung aktuell nicht erfüllt: zusätzlich den Schwellenwert
-                # ausrechnen, ab dem der Trendfilter kippen würde (siehe
-                # berechne_trend_schwelle) - beantwortet direkt "ab welchem
-                # Kursniveau schaltet der Filter wieder auf grün".
+                # Trendbedingung aktuell nicht erfüllt: zusätzlich ausrechnen, ab
+                # wann/welchem Kursniveau der Trendfilter kippen würde -
+                # beantwortet direkt "ab welchem Kursniveau schaltet der Filter
+                # wieder auf grün". Die "Tage bis Trendwechsel"-Größe (bei
+                # angenommen gleichbleibendem Kurs) ist die realistischere
+                # Antwort; der Einzeltag-Schwellenwert wird nur gezeigt, wenn er
+                # nicht unrealistisch weit vom aktuellen Kurs liegt (siehe
+                # berechne_trend_schwelle()-Docstring, warum er sonst
+                # irreführend sein kann).
                 if vorschau["trend_erfuellt"] is False:
                     letzte_49 = daily["Close"].iloc[-(POSITIONSTRADING_TREND_FENSTER - 1):].to_numpy()
-                    vorschau["trend_schwelle"] = berechne_trend_schwelle(letzte_49, POSITIONSTRADING_TREND_FENSTER)
+                    schwelle = berechne_trend_schwelle(letzte_49, POSITIONSTRADING_TREND_FENSTER)
+                    if schwelle is not None and abs(schwelle - letzter_kurs) / letzter_kurs <= 0.10:
+                        vorschau["trend_schwelle"] = schwelle
                     vorschau["sma_aktuell"] = float(daily["Close"].iloc[-POSITIONSTRADING_TREND_FENSTER:].mean())
+                    vorschau["tage_bis_trendwechsel"] = berechne_tage_bis_trendwechsel(
+                        daily["Close"].to_numpy(), POSITIONSTRADING_TREND_FENSTER, letzter_kurs
+                    )
 
         return {
             "status": "keine_position",
