@@ -1238,7 +1238,8 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
     szenarien = berechne_szenarien(daten["realtime"], pivots)
     szenarien_text = formatiere_szenarien(szenarien, fmt)
 
-    text = f"""MINI DAILY: GOLD
+    text = f"""NEUBER PRECIOUS METALS
+MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
 VORBOERSLICHE TENDENZ
@@ -1334,7 +1335,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     html = f"""
     <html><body style="background:#14110d;color:#ece6d9;font-family:monospace;padding:20px;">
-    <h1 style="color:#e8b95c;font-family:serif;">Mini Daily: Gold</h1>
+    <p style="color:#a89d87;font-size:12px;letter-spacing:2px;text-transform:uppercase;margin-bottom:2px;">Neuber Precious Metals</p>
+    <h1 style="color:#e8b95c;font-family:serif;margin-top:0;">Mini Daily: Gold</h1>
     <p style="color:#a89d87;">{heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr</p>
     {warnblock}
     <hr style="border-color:#3a3226;">
