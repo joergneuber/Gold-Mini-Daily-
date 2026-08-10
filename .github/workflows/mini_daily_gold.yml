@@ -18,11 +18,34 @@ jobs:
       - name: Abhängigkeiten installieren
         run: pip install -r requirements.txt
 
+      - name: Trade-Alert-Status wiederherstellen
+        uses: actions/cache/restore@v4
+        with:
+          path: trade_alert_state.json
+          key: gold-trade-alert-state-${{ github.run_id }}
+          restore-keys: |
+            gold-trade-alert-state-
+
       - name: Report erzeugen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: python mini_daily_gold.py
+
+      - name: Separate Trade-Alerts senden
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
+        run: python send_trade_alerts.py
+
+      - name: Trade-Alert-Status speichern
+        uses: actions/cache/save@v4
+        with:
+          path: trade_alert_state.json
+          key: gold-trade-alert-state-${{ github.run_id }}
 
       - name: Nach Google Drive hochladen
         env:
@@ -38,27 +61,3 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
         run: python send_mail.py
-
-      # Separate Trade-Event-Mail nur einmal pro eindeutigem Event.
-      # Der Cache-Key basiert auf trade_alerts.json; bei identischem Event
-      # (z.B. manueller Workflow-Neustart derselben Kerze) wird die Mail nicht
-      # erneut verschickt. Der eigentliche Event-Inhalt wird NICHT gecacht.
-      - name: Trade-Alert-Deduplizierungsdatei vorbereiten
-        run: echo "${{ hashFiles('trade_alerts.json') }}" > .trade_alert_cache_marker
-
-      - name: Trade-Alert-Event pruefen
-        id: trade_alert_cache
-        uses: actions/cache@v4
-        with:
-          path: .trade_alert_cache_marker
-          key: gold-trade-alert-${{ hashFiles('trade_alerts.json') }}
-
-      - name: Separate Trade-Alert-Mails versenden
-        if: steps.trade_alert_cache.outputs.cache-hit != 'true'
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
-        run: python send_trade_alerts.py
