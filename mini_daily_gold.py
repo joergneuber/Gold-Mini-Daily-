@@ -187,6 +187,12 @@ RANGE_AUSBRUCH_HISTORIE_TAGE = 200
 # entfernt, wird KEIN Trade eröffnet. Wir verschieben den Stop also nicht
 # künstlich nach oben, sondern lehnen ein zu riskantes Setup ab.
 RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT = 0.60
+# Vorbereitungs-Alert: bewusst nur ein Vorlauf, noch KEIN Kaufsignal.
+# 1h: aktueller Schlusskurs muss innerhalb dieses Abstands unter dem 24h-Trigger liegen.
+RANGE_AUSBRUCH_VORBEREITUNG_ABSTAND_PCT = 0.20
+# Tageschart: aktueller Kurs muss innerhalb dieses Abstands über dem 10-Tage-Swing-Tief liegen
+# und der Aufwärtstrend muss bereits erfüllt sein.
+POSITIONSTRADING_VORBEREITUNG_ABSTAND_PCT = 1.00
 RANGE_AUSBRUCH_BACKTEST_TEXT = (
     "Backtest (2020-01-24 bis 2026-08-10, 35 Trades) mit 0,60%-Risikolimit und "
     "charttechnischer C1-Zielsetzung: +19,11% Summe, 25,7% Trefferquote, "
@@ -1610,6 +1616,8 @@ def berechne_positionstrading_status():
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
+            "aktueller_kurs": letzter_kurs,
+            "letzte_zeit": letzte_zeit,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
@@ -1819,6 +1827,8 @@ def berechne_range_ausbruch_status():
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
+            "aktueller_kurs": letzter_kurs,
+            "letzte_zeit": letzte_zeit,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
             "vorschau": vorschau,
@@ -1833,10 +1843,68 @@ def berechne_range_ausbruch_status():
 # Hebel bleiben bewusst beim Nutzer (Empfehlungsbereich 20-30x).
 
 def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
-    """Schreibt ausschließlich neue Ereignisse der aktuellen Kerze in eine
-    JSON-Datei. Die eigentliche Mail wird separat im Workflow verschickt;
-    WKN/Optionsschein/ Hebel sind absichtlich nicht Bestandteil dieses Signals."""
+    """Schreibt neue Vorbereitungs- und Ausführungsereignisse.
+
+    PREPARE = Vorlauf, noch KEIN Kauf.
+    ENTRY/TP1/TP2/STOP = tatsächliche Ausführung bzw. Folgeereignis.
+
+    Der Nutzer wählt Produkt und Hebel selbst. PREPARE wird nur ausgegeben,
+    wenn der aktuelle Markt bereits ausreichend nahe am Trigger liegt.
+    """
     events = []
+
+    # 1) 1h-Range: Vorbereitungsalert nur unterhalb des echten 24h-Triggerkurses.
+    ra = range_ausbruch_status or {}
+    if ra.get("status") == "keine_position":
+        v = ra.get("vorschau") or {}
+        trigger = v.get("hypothetischer_einstieg")
+        aktueller_kurs = ra.get("aktueller_kurs")
+        if trigger and aktueller_kurs and aktueller_kurs < trigger:
+            abstand = (trigger - aktueller_kurs) / trigger * 100
+            if abstand <= RANGE_AUSBRUCH_VORBEREITUNG_ABSTAND_PCT and v.get("trade_zulaessig"):
+                events.append({
+                    "event": "PREPARE",
+                    "zeit": ra.get("letzte_zeit", datetime.now(timezone.utc)),
+                    "einstieg": float(trigger),
+                    "stop": float(v["stop"]),
+                    "tp1": float(v["tp1"]),
+                    "tp2": float(v["tp2"]),
+                    "stufe": 0,
+                    "system": "RANGE_AUSBRUCH_1H",
+                    "event_id": f"RANGE_AUSBRUCH_1H|PREPARE|{float(trigger):.2f}",
+                    "trigger_abstand_pct": abstand,
+                    "trigger_typ": "Close über 24h-Hoch",
+                })
+
+    # 2) Tageschart: Vorbereitungsalert bei Annäherung an das 10-Tage-Tief.
+    pt = positionstrading_status or {}
+    v = pt.get("vorschau") or {}
+    trigger = v.get("stop")
+    aktueller_kurs = None
+    if v:
+        aktueller_kurs = v.get("hypothetischer_einstieg")
+    trend_ok = v.get("trend_erfuellt") is True
+    if trigger and aktueller_kurs and trend_ok and aktueller_kurs > trigger:
+        abstand = (aktueller_kurs - trigger) / aktueller_kurs * 100
+        if abstand <= POSITIONSTRADING_VORBEREITUNG_ABSTAND_PCT:
+            events.append({
+                "event": "PREPARE",
+                "zeit": datetime.now(timezone.utc),
+                # Tageschart hat vor dem Bounce keinen exakten Einstieg.
+                # 'einstieg' dient hier nur als Referenzkurs; der echte Entry
+                # ist erst der Schlusskurs der Bounce-Kerze.
+                "einstieg": float(aktueller_kurs),
+                "stop": float(trigger),
+                "tp1": float(v["tp1"]),
+                "tp2": float(v["tp2"]),
+                "stufe": 0,
+                "system": "POSITIONSTRADING",
+                "event_id": f"POSITIONSTRADING|PREPARE|{float(trigger):.2f}",
+                "trigger_abstand_pct": abstand,
+                "trigger_typ": "Bounce am 10-Tage-Tief + Schluss darüber",
+            })
+
+    # 3) Tatsächliche Ereignisse aus beiden Simulationen.
     for system_name, status in (
         ("POSITIONSTRADING", positionstrading_status),
         ("RANGE_AUSBRUCH_1H", range_ausbruch_status),
@@ -1852,8 +1920,12 @@ def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
         event_out["system"] = system_name
         event_out["event_id"] = f"{system_name}|{event['event']}|{zeit}"
         events.append(event_out)
+
     with open("trade_alerts.json", "w", encoding="utf-8") as f:
-        json.dump({"created_at": datetime.now(timezone.utc).isoformat(), "events": events}, f, ensure_ascii=False, indent=2)
+        json.dump({
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "events": events,
+        }, f, ensure_ascii=False, indent=2)
     print(f"Trade-Alerts: {len(events)} neues Ereignis/e geschrieben.")
 
 

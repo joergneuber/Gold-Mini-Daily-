@@ -62,7 +62,8 @@ def mailtext(event):
     event_name = event["event"]
     zeit = datetime.fromisoformat(event["zeit"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Berlin"))
     titel = {
-        "ENTRY": "🟢 GOLD LONG – ENTRY",
+        "PREPARE": "🟡 GOLD LONG – VORBEREITEN",
+        "ENTRY": "🟢 GOLD LONG – ENTRY AUSGELÖST",
         "TP1": "🟢 GOLD LONG – TP1 ERREICHT",
         "TP2": "🟢 GOLD LONG – TP2 ERREICHT",
         "STOP": "🔴 GOLD LONG – STOP ERREICHT",
@@ -93,6 +94,20 @@ def mailtext(event):
             "Tageschart: TP1 = 2R | TP2 = 3R",
         ])
 
+    if event_name == "PREPARE":
+        zeilen.extend([
+            "",
+            "⚠ NOCH KEIN KAUF.",
+            f"Trigger:    {event.get('trigger_typ', 'Setup-Trigger')}",
+            f"Abstand zum Trigger: {de_zahl(event.get('trigger_abstand_pct', 0))} %",
+            "Jetzt Schein/Hebel auswählen und Kauf vorbereiten.",
+        ])
+    elif event_name == "ENTRY":
+        zeilen.extend([
+            "",
+            "🟢 JETZT IST DIE ENTRY-BEDINGUNG ERFÜLLT.",
+            "Kauf kann manuell ausgeführt werden.",
+        ])
     zeilen.extend([
         "",
         f"Ereignis:   {event_name}",
