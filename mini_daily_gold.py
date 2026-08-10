@@ -188,18 +188,24 @@ RANGE_AUSBRUCH_HISTORIE_TAGE = 200
 # künstlich nach oben, sondern lehnen ein zu riskantes Setup ab.
 RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT = 0.60
 RANGE_AUSBRUCH_BACKTEST_TEXT = (
-    "Backtest nach Einführung des 0,60%-Risikolimits noch nicht neu gerechnet. "
-    "Bitte den Workflow 'Backtest Range-Ausbruch (XAU/USD, 1h)' ausführen; erst danach "
-    "die neuen Kennzahlen als Referenz übernehmen."
+    "Backtest (2020-01-24 bis 2026-08-10, 35 Trades) mit 0,60%-Risikolimit und "
+    "charttechnischer C1-Zielsetzung: +19,11% Summe, 25,7% Trefferquote, "
+    "Ø Trade +0,55%. C1 wurde gegen 2R/3R sowie C2/C3 getestet und war im "
+    "bisherigen Test die beste Variante."
 )
 RANGE_AUSBRUCH_REGELN_TEXT = (
     "Regeln: Nur Long. Schlusskurs bricht über das rollierende 24h-Hoch aus "
     "(bestätigter Close, kein reiner Docht) -> KAUF. Stop = 24h-Tief zum "
     "Einstiegszeitpunkt. Liegt der Stop-Abstand über "
     f"{RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT:.2f}%, wird der Trade abgelehnt "
-    "(Stop wird NICHT künstlich verschoben). TP1/TP2 = 2R/3R: TP1 erreicht -> Stop auf Breakeven, "
-    "TP2 erreicht -> Stop auf TP1, danach kontinuierlich am 24h-Tief "
-    "nachgezogen. Stop erreicht -> VERKAUF, danach 12 Stunden Cooldown."
+    "(Stop wird NICHT künstlich verschoben). TP1 = erster bereits bestätigter "
+    "1h-Swing-Widerstand mindestens 1R oberhalb des Einstiegs; TP2 = erster "
+    "bereits bestätigter 1h-Swing-Widerstand mindestens 3R oberhalb des Einstiegs. "
+    "Falls kein passender Widerstand vorhanden ist, Fallback auf 2R (TP1) bzw. 3R (TP2). "
+    "TP1 erreicht -> Stop auf Breakeven, TP2 erreicht -> Stop auf TP1, danach "
+    "kontinuierlich am 24h-Tief nachgezogen. Stop erreicht -> VERKAUF, danach "
+    "12 Stunden Cooldown. Die Swing-Highs müssen mit 2 Kerzen links und 2 Kerzen "
+    "rechts bestätigt sein; es wird kein zukünftiges Wissen verwendet."
 ) + volatilitaets_filter_text(VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
 
 
@@ -1612,9 +1618,61 @@ def berechne_positionstrading_status():
         }
 
 
+
+def bestaetigte_range_widerstaende(stunden, left=2, right=2):
+    """Ermittelt bestätigte 1h-Swing-Highs ohne Look-ahead.
+
+    Ein Hoch an Position i wird erst ab i+right als bekannt betrachtet.
+    Rückgabe: Liste (bestätigungsindex, preis).
+    """
+    highs = stunden["High"].to_numpy(dtype=float)
+    result = []
+    for i in range(left, len(stunden) - right):
+        links = highs[i-left:i]
+        rechts = highs[i+1:i+right+1]
+        if highs[i] >= links.max() and highs[i] > rechts.max():
+            result.append((i + right, float(highs[i])))
+    return result
+
+
+def range_tp_ziele_charttechnisch(stunden, swing_highs, entry_idx, entry, stop):
+    """C1-TP-Logik des MINI DAILY GOLD Range-Ausbruchs.
+
+    TP1: nächster bereits bestätigter Swing-Widerstand >= 1R.
+    TP2: nächster bereits bestätigter Swing-Widerstand >= 3R.
+    Fallback auf 2R/3R, wenn kein passender Widerstand existiert.
+    """
+    r = entry - stop
+    if r <= 0:
+        return entry, entry
+
+    bekannte = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
+                       if bestaetigung <= entry_idx})
+
+    tp1_min = entry + 1.0 * r
+    tp1_kandidaten = [preis for preis in bekannte if preis >= tp1_min]
+    tp1 = min(tp1_kandidaten) if tp1_kandidaten else entry + 2.0 * r
+
+    tp2_min = entry + 3.0 * r
+    tp2_kandidaten = [preis for preis in bekannte if preis >= tp2_min]
+    tp2 = min(tp2_kandidaten) if tp2_kandidaten else entry + 3.0 * r
+
+    if tp2 <= tp1:
+        tp2 = max(tp1, entry + 3.0 * r)
+
+    return float(tp1), float(tp2)
+
 def berechne_range_ausbruch_status():
-    """Simuliert das Range-Ausbruch-Signal (1h, rollierendes 24h-Hoch/-Tief,
-    TP1/TP2=2R/3R analog zum V1e-System) über die letzten
+    """Simuliert das Range-Ausbruch-Signal (1h, rollierendes 24h-Hoch/-Tief).
+
+    TP1 = erster bereits bestätigter 1h-Swing-Widerstand >= 1R.
+    TP2 = erster bereits bestätigter 1h-Swing-Widerstand >= 3R.
+    Fallback: 2R/3R, falls kein passender Widerstand vorhanden ist.
+    Die Swing-Highs werden mit 2 Kerzen links und 2 rechts bestätigt; ein
+    Swing darf erst nach seiner Bestätigung als Ziel verwendet werden (kein
+    Look-ahead).
+
+    Über die letzten
     RANGE_AUSBRUCH_HISTORIE_TAGE Tage und liefert den aktuellen Stand -
     holt dafür genau EINE zusätzliche Twelve-Data-Anfrage (siehe Kommentar
     bei den RANGE_AUSBRUCH_*-Konstanten weiter oben, warum nicht die volle
@@ -1628,6 +1686,7 @@ def berechne_range_ausbruch_status():
     if len(stunden) < RANGE_AUSBRUCH_FENSTER + 5:
         return {"status": "keine_daten"}
 
+    swing_highs = bestaetigte_range_widerstaende(stunden, left=2, right=2)
     range_hoch_referenz = stunden["High"].rolling(RANGE_AUSBRUCH_FENSTER).max().shift(1)
     range_tief_referenz = stunden["Low"].rolling(RANGE_AUSBRUCH_FENSTER).min().shift(1)
     vola_erlaubt = berechne_volatilitaets_erlaubt(stunden, VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
@@ -1662,9 +1721,9 @@ def berechne_range_ausbruch_status():
                             "zeit": zeit
                         }
                         continue
-                    r = entry - stop
-                    tp1 = entry + 2 * r
-                    tp2 = entry + 3 * r
+                    tp1, tp2 = range_tp_ziele_charttechnisch(
+                        stunden, swing_highs, stunden.index.get_loc(zeit), entry, stop
+                    )
                     in_position = True
                     stufe = 0
                     entry_zeit = zeit
@@ -1743,12 +1802,16 @@ def berechne_range_ausbruch_status():
             if ref_tief_aktuell < ref_hoch_aktuell:
                 r = ref_hoch_aktuell - ref_tief_aktuell
                 risiko_pct = r / ref_hoch_aktuell * 100
+                entry_idx = len(stunden) - 1
+                tp1_vorschau, tp2_vorschau = range_tp_ziele_charttechnisch(
+                    stunden, swing_highs, entry_idx, ref_hoch_aktuell, ref_tief_aktuell
+                )
                 vorschau = {
                     "stop": ref_tief_aktuell,
                     "hypothetischer_einstieg": ref_hoch_aktuell,
                     "einstieg_praezise": True,
-                    "tp1": ref_hoch_aktuell + 2 * r,
-                    "tp2": ref_hoch_aktuell + 3 * r,
+                    "tp1": tp1_vorschau,
+                    "tp2": tp2_vorschau,
                     "risiko_pct": risiko_pct,
                     "trade_zulaessig": risiko_pct <= RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT,
                 }

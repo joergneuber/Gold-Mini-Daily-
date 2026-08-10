@@ -95,6 +95,13 @@ def sende(event):
 
 
 def main():
+    # Der Workflow cached diese Datei zwischen Läufen. Auch wenn kein neues
+    # Ereignis vorliegt, muss die Datei existieren, damit actions/cache/save
+    # keinen "Path Validation Error" meldet.
+    if not STATE_FILE.exists():
+        with STATE_FILE.open("w", encoding="utf-8") as f:
+            json.dump({"sent_event_ids": []}, f, ensure_ascii=False, indent=2)
+
     neue = hole_neue_events()
     if not neue:
         print("Keine neuen Gold-Trade-Events – keine separate Alert-Mail.")
