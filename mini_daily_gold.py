@@ -1872,6 +1872,8 @@ def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
                     "stufe": 0,
                     "system": "RANGE_AUSBRUCH_1H",
                     "event_id": f"RANGE_AUSBRUCH_1H|PREPARE|{float(trigger):.2f}",
+                    "aktueller_kurs": float(aktueller_kurs),
+                    "trigger_kurs": float(trigger),
                     "trigger_abstand_pct": abstand,
                     "trigger_typ": "Close über 24h-Hoch",
                 })
@@ -1900,6 +1902,8 @@ def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
                 "stufe": 0,
                 "system": "POSITIONSTRADING",
                 "event_id": f"POSITIONSTRADING|PREPARE|{float(trigger):.2f}",
+                "aktueller_kurs": float(aktueller_kurs),
+                "trigger_kurs": float(trigger),
                 "trigger_abstand_pct": abstand,
                 "trigger_typ": "Bounce am 10-Tage-Tief + Schluss darüber",
             })
