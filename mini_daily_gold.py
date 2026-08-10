@@ -13,6 +13,7 @@ Vorher yfinance/GC=F (Gold-Future) - Umstellung auf Spot + 1h-Intraday am
 genutzt) nur Tages-OHLC liefert, kein Intraday-Intervall.
 """
 
+import json
 import os
 import sys
 import time
@@ -180,15 +181,24 @@ POSITIONSTRADING_REGELN_TEXT = (
 RANGE_AUSBRUCH_FENSTER = 24  # Stunden-Kerzen für die Range-Hoch/-Tief-Referenz
 RANGE_AUSBRUCH_COOLDOWN_STUNDEN = 12
 RANGE_AUSBRUCH_HISTORIE_TAGE = 200
+# Risikobegrenzung fuer den 1h-Range-Ausbruch: Der strukturelle Stop bleibt
+# das 24h-Tief. Ist dieses vom Entry weiter als 0,60% entfernt, wird das
+# Setup NICHT gehandelt. Das ist bewusst ein Filter statt eines kuenstlich
+# hoeher gesetzten Stops: so bleibt die Range-Logik statistisch sauber und
+# ist unabhaengig davon, welchen Hebel/Optionsschein der Nutzer spaeter selbst
+# waehlt. 0,60% entsprechen bei ~30x Hebel grob ~18% Zertifikatsrisiko.
+RANGE_AUSBRUCH_MAX_STOP_PCT = 0.60
 RANGE_AUSBRUCH_BACKTEST_TEXT = (
-    "144 Trades 24.01.2020-05.08.2026, Trefferquote 32,6%, Summe +110,82% "
-    "(Backtest-Snapshot vom 05.08.2026, XAU/USD 1h - nicht laufend neu berechnet)."
+    "Backtest-Kennzahlen nach Einfuehrung des 0,60%-Risiko-Caps muessen neu "
+    "berechnet werden (Workflow: Backtest Range-Ausbruch)."
 )
 RANGE_AUSBRUCH_REGELN_TEXT = (
-    "Regeln: Nur Long. Schlusskurs bricht über das rollierende 24h-Hoch aus "
-    "(bestätigter Close, kein reiner Docht) -> KAUF. Stop = 24h-Tief zum "
-    "Einstiegszeitpunkt. TP1/TP2 = 2R/3R: TP1 erreicht -> Stop auf Breakeven, "
-    "TP2 erreicht -> Stop auf TP1, danach kontinuierlich am 24h-Tief "
+    "Regeln: Nur Long. Schlusskurs bricht ueber das rollierende 24h-Hoch aus "
+    "(bestaetigter Close, kein reiner Docht) -> KAUF. Stop = 24h-Tief zum "
+    "Einstiegszeitpunkt. Nur wenn der Abstand Entry->Stop maximal "
+    f"{RANGE_AUSBRUCH_MAX_STOP_PCT:.2f}% betraegt; bei groesserem Abstand wird "
+    "das Setup uebersprungen. TP1/TP2 = 2R/3R: TP1 erreicht -> Stop auf "
+    "Breakeven, TP2 erreicht -> Stop auf TP1, danach kontinuierlich am 24h-Tief "
     "nachgezogen. Stop erreicht -> VERKAUF, danach 12 Stunden Cooldown."
 ) + volatilitaets_filter_text(VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
 
@@ -1080,6 +1090,11 @@ def formatiere_vorschau(status, fmt):
         f"Vorschau (kein aktives Signal): Einstieg {einstieg_label}, Stop {fmt(vorschau['stop'])} USD, "
         f"TP1 {fmt(vorschau['tp1'])} USD (CRV {crv1:.1f}), TP2 {fmt(vorschau['tp2'])} USD (CRV {crv2:.1f})"
     )
+    if vorschau.get("setup_gueltig") is False:
+        zeile += (
+            f". Setup NICHT gueltig: Stop-Abstand {de_zahl(vorschau['stop_risiko_pct'])}% "
+            f"ueber dem Risiko-Cap von {de_zahl(vorschau['risiko_cap_pct'])}% - kein Entry"
+        )
     if vorschau.get("trend_erfuellt") is False:
         zeile += ". Trendbedingung aktuell NICHT erfüllt - Vorschau daher rein illustrativ, kein gültiges Setup."
         tage = vorschau.get("tage_bis_trendwechsel")
@@ -1428,6 +1443,7 @@ def berechne_positionstrading_status():
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
     alle_trades = []  # sammelt jeden abgeschlossenen Trade für die Live-Backtest-Kennzahlen im Footer
+    alert_events = []  # nur neu auf dieser Datenkerze ausgelöste Ereignisse
 
     for datum, bar in daily.iterrows():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
@@ -1450,10 +1466,21 @@ def berechne_positionstrading_status():
                         in_position = True
                         stufe = 0
                         entry_datum = datum
+                        alert_events.append({
+                            "typ": "ENTRY", "system": "POSITIONSTRADING_TAGESBASIS",
+                            "zeit": datum, "einstieg": entry, "stop": stop,
+                            "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                        })
         else:
             if stufe == 2 and pd.notna(ref_tief):
                 stop = max(stop, float(ref_tief))
             if tief <= stop:
+                alert_events.append({
+                    "typ": "STOP", "system": "POSITIONSTRADING_TAGESBASIS",
+                    "zeit": datum, "einstieg": entry, "stop": stop,
+                    "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                    "ausstieg": stop,
+                })
                 letzter_abgeschlossener_trade = {
                     "einstieg_datum": entry_datum, "ausstieg_datum": datum,
                     "ergebnis_pct": (stop - entry) / entry * 100,
@@ -1464,9 +1491,19 @@ def berechne_positionstrading_status():
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
+                alert_events.append({
+                    "typ": "TP2", "system": "POSITIONSTRADING_TAGESBASIS",
+                    "zeit": datum, "einstieg": entry, "stop": stop,
+                    "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                })
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
+                alert_events.append({
+                    "typ": "TP1", "system": "POSITIONSTRADING_TAGESBASIS",
+                    "zeit": datum, "einstieg": entry, "stop": stop,
+                    "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                })
 
     def backtest_kennzahlen_text():
         """Baut den Footer-Satz live aus alle_trades statt aus einer fest
@@ -1506,6 +1543,7 @@ def berechne_positionstrading_status():
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_tage": (letztes_datum - entry_datum).days,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
+            "alerts_aktuell": [e for e in alert_events if e["zeit"] == letztes_datum],
         }
     else:
         # War der AUSSTIEG (Stop) genau die letzte (heutige) Kerze -> heute
@@ -1561,6 +1599,7 @@ def berechne_positionstrading_status():
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
             "vorschau": vorschau,
+            "alerts_aktuell": [e for e in alert_events if e["zeit"] == letztes_datum],
         }
 
 
@@ -1590,6 +1629,7 @@ def berechne_range_ausbruch_status():
     entry_zeit = None
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
+    alert_events = []
 
     for zeit, bar in stunden.iterrows():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
@@ -1602,18 +1642,32 @@ def berechne_range_ausbruch_status():
                 continue
             if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch) and vola_ok:
                 entry = schluss
-                stop = float(ref_tief)
-                if stop < entry:
-                    r = entry - stop
-                    tp1 = entry + 2 * r
-                    tp2 = entry + 3 * r
-                    in_position = True
-                    stufe = 0
-                    entry_zeit = zeit
+                roher_stop = float(ref_tief)
+                if roher_stop < entry:
+                    risiko_pct = (entry - roher_stop) / entry * 100
+                    if risiko_pct <= RANGE_AUSBRUCH_MAX_STOP_PCT:
+                        stop = roher_stop
+                        r = entry - stop
+                        tp1 = entry + 2 * r
+                        tp2 = entry + 3 * r
+                        in_position = True
+                        stufe = 0
+                        entry_zeit = zeit
+                        alert_events.append({
+                            "typ": "ENTRY", "system": "RANGE_AUSBRUCH_1H",
+                            "zeit": zeit, "einstieg": entry, "stop": stop,
+                            "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                        })
         else:
             if stufe == 2 and pd.notna(ref_tief):
                 stop = max(stop, float(ref_tief))
             if tief <= stop:
+                alert_events.append({
+                    "typ": "STOP", "system": "RANGE_AUSBRUCH_1H",
+                    "zeit": zeit, "einstieg": entry, "stop": stop,
+                    "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                    "ausstieg": stop,
+                })
                 letzter_abgeschlossener_trade = {
                     "einstieg_zeit": entry_zeit, "ausstieg_zeit": zeit,
                     "ergebnis_pct": (stop - entry) / entry * 100,
@@ -1623,9 +1677,19 @@ def berechne_range_ausbruch_status():
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
+                alert_events.append({
+                    "typ": "TP2", "system": "RANGE_AUSBRUCH_1H",
+                    "zeit": zeit, "einstieg": entry, "stop": stop,
+                    "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                })
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
+                alert_events.append({
+                    "typ": "TP1", "system": "RANGE_AUSBRUCH_1H",
+                    "zeit": zeit, "einstieg": entry, "stop": stop,
+                    "tp1": tp1, "tp2": tp2, "stufe": stufe,
+                })
 
     letzter_kurs = float(stunden["Close"].iloc[-1])
     letzte_zeit = stunden.index[-1]
@@ -1648,6 +1712,7 @@ def berechne_range_ausbruch_status():
             "aktueller_kurs": letzter_kurs,
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_stunden": (letzte_zeit - entry_zeit).total_seconds() / 3600,
+            "alerts_aktuell": [e for e in alert_events if e["zeit"] == letzte_zeit],
         }
     else:
         heutiges_signal = "VERKAUF"
@@ -1667,12 +1732,16 @@ def berechne_range_ausbruch_status():
             ref_tief_aktuell = float(ref_tief_aktuell)
             if ref_tief_aktuell < ref_hoch_aktuell:
                 r = ref_hoch_aktuell - ref_tief_aktuell
+                risiko_pct = r / ref_hoch_aktuell * 100
                 vorschau = {
                     "stop": ref_tief_aktuell,
                     "hypothetischer_einstieg": ref_hoch_aktuell,
                     "einstieg_praezise": True,
                     "tp1": ref_hoch_aktuell + 2 * r,
                     "tp2": ref_hoch_aktuell + 3 * r,
+                    "stop_risiko_pct": risiko_pct,
+                    "risiko_cap_pct": RANGE_AUSBRUCH_MAX_STOP_PCT,
+                    "setup_gueltig": risiko_pct <= RANGE_AUSBRUCH_MAX_STOP_PCT,
                 }
 
         return {
@@ -1681,6 +1750,7 @@ def berechne_range_ausbruch_status():
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
             "vorschau": vorschau,
+            "alerts_aktuell": [e for e in alert_events if e["zeit"] == letzte_zeit],
         }
 
 
@@ -1743,6 +1813,14 @@ def main():
         f.write(html)
     with open("mini_daily_gold.txt", "w", encoding="utf-8") as f:
         f.write(text)
+
+    # Separate Event-Alerts: nur Ereignisse der aktuellsten Datenkerze.
+    trade_alerts = (range_ausbruch_status.get("alerts_aktuell", []) +
+                    positionstrading_status.get("alerts_aktuell", []))
+    for event in trade_alerts:
+        event["zeit"] = pd.Timestamp(event["zeit"]).isoformat()
+    with open("trade_alerts.json", "w", encoding="utf-8") as f:
+        json.dump(trade_alerts, f, ensure_ascii=False, indent=2)
 
     print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(f"Widerstände: {pivots['r']}")

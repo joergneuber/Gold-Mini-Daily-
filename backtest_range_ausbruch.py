@@ -20,7 +20,8 @@ Regeln (Vorschlag, noch nicht bestätigt - genau deshalb dieser Backtest):
    RANGE_FENSTER Stunden-Kerzen (nur bis zur Vorkerze, kein Lookahead).
 2. Einstieg: Schlusskurs bricht über das Range-Hoch aus (bestätigter Close,
    kein reiner Docht-Ausbruch).
-3. Stop: Range-Tief zum Einstiegszeitpunkt, fest.
+3. Stop: Range-Tief zum Einstiegszeitpunkt, fest. Wenn der Abstand Entry->Stop
+   mehr als MAX_STOP_PCT betraegt, wird das Setup uebersprungen (Risikocap).
 4. TP1/TP2 = 2R/3R. Stufenregel wie beim V1e-System: TP1 -> Breakeven,
    TP2 -> TP1-Niveau, danach kontinuierlich am aktuellen Range-Tief
    nachgezogen.
@@ -45,6 +46,7 @@ START_DATUM = date(2019, 1, 1)  # so weit zurück wie möglich - der Tarif entsc
 CHUNK_TAGE = 180  # ~180*24=4320 Stundenkerzen pro Anfrage, unter dem 5000er-Limit
 RANGE_FENSTER = 24  # Stunden-Kerzen für die Range-Referenz (=~1 Handelstag bei 24h-Notierung)
 COOLDOWN_STUNDEN = 12
+MAX_STOP_PCT = 0.60  # Setup ueberspringen, wenn Entry->24h-Tief > 0,60%
 
 
 def hole_api_key():
@@ -151,14 +153,17 @@ def backtest(stunden):
                 continue
             if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch):
                 entry = schluss
-                stop = float(ref_tief)
-                if stop < entry:
-                    r = entry - stop
-                    tp1 = entry + 2 * r
-                    tp2 = entry + 3 * r
-                    in_position = True
-                    stufe = 0
-                    entry_zeit = zeit
+                roher_stop = float(ref_tief)
+                if roher_stop < entry:
+                    risiko_pct = (entry - roher_stop) / entry * 100
+                    if risiko_pct <= MAX_STOP_PCT:
+                        stop = roher_stop
+                        r = entry - stop
+                        tp1 = entry + 2 * r
+                        tp2 = entry + 3 * r
+                        in_position = True
+                        stufe = 0
+                        entry_zeit = zeit
         else:
             if stufe == 2 and pd.notna(ref_tief):
                 stop = max(stop, float(ref_tief))
