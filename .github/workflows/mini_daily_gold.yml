@@ -38,3 +38,27 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
         run: python send_mail.py
+
+      # Separate Trade-Event-Mail nur einmal pro eindeutigem Event.
+      # Der Cache-Key basiert auf trade_alerts.json; bei identischem Event
+      # (z.B. manueller Workflow-Neustart derselben Kerze) wird die Mail nicht
+      # erneut verschickt. Der eigentliche Event-Inhalt wird NICHT gecacht.
+      - name: Trade-Alert-Deduplizierungsdatei vorbereiten
+        run: echo "${{ hashFiles('trade_alerts.json') }}" > .trade_alert_cache_marker
+
+      - name: Trade-Alert-Event pruefen
+        id: trade_alert_cache
+        uses: actions/cache@v4
+        with:
+          path: .trade_alert_cache_marker
+          key: gold-trade-alert-${{ hashFiles('trade_alerts.json') }}
+
+      - name: Separate Trade-Alert-Mails versenden
+        if: steps.trade_alert_cache.outputs.cache-hit != 'true'
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
+        run: python send_trade_alerts.py
