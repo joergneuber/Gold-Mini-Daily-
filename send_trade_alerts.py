@@ -67,17 +67,41 @@ def mailtext(event):
         "TP2": "🟢 GOLD LONG – TP2 ERREICHT",
         "STOP": "🔴 GOLD LONG – STOP ERREICHT",
     }[event_name]
+
     neue_stop = event["stop"]
-    return (f"{titel}\n\n"
-            f"System:     {system}\n"
-            f"Zeit:       {zeit.strftime('%d.%m.%Y %H:%M')} Uhr\n\n"
-            f"Einstieg:   {de_zahl(event['einstieg'])} USD\n"
-            f"Stop:       {de_zahl(event['stop'])} USD\n"
-            f"TP1:        {de_zahl(event['tp1'])} USD\n"
-            f"TP2:        {de_zahl(event['tp2'])} USD\n\n"
-            f"Ereignis:   {event_name}\n"
-            f"Neuer Stop nach Ereignis: {de_zahl(neue_stop)} USD\n\n"
-            f"WKN/Optionsschein/Hebel: vom Nutzer selbst gewählt.\n")
+    zeilen = [
+        titel,
+        "",
+        f"System:     {system}",
+        f"Zeit:       {zeit.strftime('%d.%m.%Y %H:%M')} Uhr",
+        "",
+        f"Gold Entry: {de_zahl(event['einstieg'])} USD",
+        f"Stop Gold:  {de_zahl(event['stop'])} USD",
+        f"TP1 Gold:   {de_zahl(event['tp1'])} USD",
+        f"TP2 Gold:   {de_zahl(event['tp2'])} USD",
+        "",
+    ]
+
+    if system == "RANGE_AUSBRUCH_1H":
+        zeilen.extend([
+            "Max. Stop-Risiko: 0,60 %",
+            "TP1: 1h-Widerstand ab 1R",
+            "TP2: 1h-Widerstand ab 3R",
+        ])
+    else:
+        zeilen.extend([
+            "Tageschart: TP1 = 2R | TP2 = 3R",
+        ])
+
+    zeilen.extend([
+        "",
+        f"Ereignis:   {event_name}",
+        f"Neuer Stop: {de_zahl(neue_stop)} USD",
+        "",
+        "Schein/Hebel: selbst wählen (z. B. Hebel 20–30).",
+        "WKN/Optionsschein wird vom System bewusst NICHT vorgegeben.",
+    ])
+    return "\n".join(zeilen) + "\n"
 
 
 def sende(event):

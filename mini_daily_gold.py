@@ -1827,6 +1827,11 @@ def berechne_range_ausbruch_status():
         }
 
 
+# Alert-Vertrag: ENTRY/TP1/TP2/STOP werden fuer 1h und Tageschart als separate
+# Ereignisse geschrieben. Die Mail liefert immer Gold-Entry, Gold-Stop, TP1, TP2;
+# beim 1h-Setup zusaetzlich das harte Maximalrisiko von 0,60 %. WKN, Produkt und
+# Hebel bleiben bewusst beim Nutzer (Empfehlungsbereich 20-30x).
+
 def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
     """Schreibt ausschließlich neue Ereignisse der aktuellen Kerze in eine
     JSON-Datei. Die eigentliche Mail wird separat im Workflow verschickt;
