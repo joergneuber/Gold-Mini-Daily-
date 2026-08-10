@@ -1617,7 +1617,7 @@ def berechne_positionstrading_status():
             "status": "keine_position",
             "signal": heutiges_signal,
             "aktueller_kurs": letzter_kurs,
-            "letzte_zeit": letzte_zeit,
+            "letzte_zeit": letztes_datum,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
