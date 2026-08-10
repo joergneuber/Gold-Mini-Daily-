@@ -1,34 +1,26 @@
 """
-Backtest Range-Ausbruch (XAU/USD, 1h) - Twelve Data
------------------------------------------------------
-Hintergrund: Das bestehende V1e-Positionstrading-Signal im Mini-Daily-Report
-ist bewusst träge (Haltedauer Tage bis Wochen) und zeigt bei 6 Läufen/Tag an
-den allermeisten Tagen "KEIN SIGNAL". Diskutiert wurde ein zweites,
-schneller reagierendes Signal auf Basis der 1h-Kerzen (Range-Ausbruch).
-Bevor so etwas ins Briefing kommt, wird es hier genau wie das V1e-System
-zuerst separat gegen echte Historie getestet - nicht ungeprüft eingebaut.
+Backtest Range-Ausbruch 1h – drei TP-Varianten für MINI DAILY GOLD
 
-WICHTIG (Twelve Data Free/Basic-Tarife): Wie weit `start_date` für
-Stundenkerzen tatsächlich zurückreicht, hängt vom gebuchten Plan ab - manche
-Tarife liefern nur die letzten Monate an Intraday-Historie. Das Skript holt
-einfach so viel wie die API hergibt und meldet den tatsächlich erhaltenen
-Zeitraum im Log; ein kurzer Backtest-Zeitraum ist dann kein Bug, sondern
-eine Tarif-Grenze.
+Gemeinsame Entry-/Stop-Regeln:
+- Long-only
+- Entry: bestätigter 1h-Schlusskurs über dem rollierenden 24h-Hoch
+- Stop: rollierendes 24h-Tief zum Entry
+- Stop-Abstand > 0,60 %: Trade wird abgelehnt (Stop wird nicht verschoben)
+- Cooldown nach Stop: 12 Stunden
+- TP1 erreicht -> Stop auf Breakeven
+- TP2 erreicht -> Stop auf TP1
+- danach Stop am aktuellen 24h-Tief nachziehen
 
-Regeln (Vorschlag, noch nicht bestätigt - genau deshalb dieser Backtest):
-1. Long-only. Range-Referenz: rollierendes Hoch/Tief der letzten
-   RANGE_FENSTER Stunden-Kerzen (nur bis zur Vorkerze, kein Lookahead).
-2. Einstieg: Schlusskurs bricht über das Range-Hoch aus (bestätigter Close,
-   kein reiner Docht-Ausbruch).
-3. Stop: Range-Tief zum Einstiegszeitpunkt, fest.
-4. TP1/TP2 = 2R/3R. Stufenregel wie beim V1e-System: TP1 -> Breakeven,
-   TP2 -> TP1-Niveau, danach kontinuierlich am aktuellen Range-Tief
-   nachgezogen.
-5. Cooldown: COOLDOWN_STUNDEN nach einem Stop, kein neuer Einstieg.
+TP-Varianten:
+A = Referenz: TP1=2R, TP2=3R
+B = Charttechnisch: TP1=erste bestätigte 1h-Widerstandszone >= 1R,
+    TP2=darauffolgende bestätigte 1h-Widerstandszone
+C = Hybrid: TP1=erste bestätigte 1h-Widerstandszone >= 1R,
+    TP2=max(darauffolgende bestätigte 1h-Widerstandszone, 3R)
 
-Datenquelle: Twelve Data Time-Series API (https://twelvedata.com), Symbol
-XAU/USD, Intervall 1h. Erwartet TWELVEDATA_API_KEY als Umgebungsvariable
-(gleicher Key wie im Mini-Daily-Gold-Projekt, als GitHub Secret hinterlegen).
+WICHTIG: Widerstände werden ohne Lookahead bestimmt. Ein Swing-High wird erst
+fenster Stunden nach seiner Bildung als bestätigt betrachtet. Für einen Entry
+werden nur bis zum Entry-Zeitpunkt bestätigte Swing-Highs verwendet.
 """
 
 import os
@@ -41,42 +33,48 @@ import numpy as np
 TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
 SYMBOL = "XAU/USD"
 INTERVALL = "1h"
-START_DATUM = date(2019, 1, 1)  # so weit zurück wie möglich - der Tarif entscheidet, wie viel ankommt
-CHUNK_TAGE = 180  # ~180*24=4320 Stundenkerzen pro Anfrage, unter dem 5000er-Limit
-RANGE_FENSTER = 24  # Stunden-Kerzen für die Range-Referenz (=~1 Handelstag bei 24h-Notierung)
+START_DATUM = date(2019, 1, 1)
+CHUNK_TAGE = 180
+RANGE_FENSTER = 24
 COOLDOWN_STUNDEN = 12
 MAX_STOP_ABSTAND_PCT = 0.60
+
+# Charttechnische TP-Parameter
+SWING_FENSTER = 3              # 3 links + 3 rechts; erst danach bestätigt
+WIDERSTAND_BUCKET_USD = 5.0
+WIDERSTAND_MIN_TREFFER = 2
+MIN_TP1_R = 1.0
 
 
 def hole_api_key():
     key = os.environ.get("TWELVEDATA_API_KEY")
     if not key:
-        raise EnvironmentError(
-            "TWELVEDATA_API_KEY nicht gesetzt. Gleichen Key wie im Mini-Daily-Gold-Projekt "
-            "verwenden und als GitHub Secret hinterlegen."
-        )
+        raise EnvironmentError("TWELVEDATA_API_KEY nicht gesetzt.")
     return key
 
 
 def hole_ausschnitt(api_key, start, ende, max_versuche=4):
-    """Holt einen Zeitausschnitt. Bei HTTP 429 (Rate-Limit) wird NICHT
-    aufgegeben, sondern bis zu max_versuche mal mit Wartezeit erneut
-    versucht - sonst gehen bei einem Tarif-Limit stillschweigend ganze
-    Zeiträume verloren (Befund 05.08.2026: 2 Jahre Historie fehlten dadurch)."""
     for versuch in range(1, max_versuche + 1):
-        antwort = requests.get(
-            TWELVEDATA_BASIS_URL,
-            params={
-                "symbol": SYMBOL, "interval": INTERVALL, "apikey": api_key,
-                "timezone": "UTC", "order": "ASC",
-                "start_date": start.isoformat(), "end_date": ende.isoformat(),
-                "outputsize": 5000,
-            },
-            timeout=20,
-        )
-        # Erst die JSON-Antwort auslesen, DANACH ggf. abbrechen - Twelve Data
-        # liefert bei Fehlern (Rate-Limit, kein Zugriff auf den Zeitraum)
-        # trotzdem eine erklärende Nachricht im Body mit.
+        try:
+            antwort = requests.get(
+                TWELVEDATA_BASIS_URL,
+                params={
+                    "symbol": SYMBOL, "interval": INTERVALL, "apikey": api_key,
+                    "timezone": "UTC", "order": "ASC",
+                    "start_date": start.isoformat(), "end_date": ende.isoformat(),
+                    "outputsize": 5000,
+                },
+                timeout=60,
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            wartezeit = min(30 * versuch, 90)
+            print(f"  Netzwerkfehler {start} bis {ende} (Versuch {versuch}/{max_versuche}): {exc}")
+            if versuch < max_versuche:
+                print(f"  Warte {wartezeit}s und versuche erneut...")
+                time.sleep(wartezeit)
+                continue
+            return pd.DataFrame()
+
         try:
             daten = antwort.json()
         except ValueError:
@@ -85,14 +83,11 @@ def hole_ausschnitt(api_key, start, ende, max_versuche=4):
 
         if antwort.status_code == 429:
             wartezeit = 65
-            print(f"  Rate-Limit bei {start} bis {ende} (Versuch {versuch}/{max_versuche}) - "
-                  f"warte {wartezeit}s und versuche es erneut...")
+            print(f"  Rate-Limit bei {start} bis {ende} (Versuch {versuch}/{max_versuche}) - warte {wartezeit}s...")
             time.sleep(wartezeit)
             continue
-
         if antwort.status_code != 200 or daten.get("status") == "error":
-            print(f"  Kein Ausschnitt {start} bis {ende} (HTTP {antwort.status_code}): "
-                  f"{daten.get('message', daten)}")
+            print(f"  Kein Ausschnitt {start} bis {ende} (HTTP {antwort.status_code}): {daten.get('message', daten)}")
             return pd.DataFrame()
         if "values" not in daten:
             return pd.DataFrame()
@@ -104,14 +99,12 @@ def hole_ausschnitt(api_key, start, ende, max_versuche=4):
             df[spalte] = df[spalte].astype(float)
         return df.set_index("Datum").sort_index()[["Open", "High", "Low", "Close"]]
 
-    print(f"  Aufgegeben nach {max_versuche} Versuchen (weiter im Rate-Limit): {start} bis {ende}")
     return pd.DataFrame()
 
 
 def hole_daten():
     api_key = hole_api_key()
     heute = date.today()
-
     teile = []
     fenster_start = START_DATUM
     while fenster_start < heute:
@@ -121,29 +114,100 @@ def hole_daten():
         if not teil.empty:
             teile.append(teil)
         fenster_start = fenster_ende + timedelta(days=1)
-        time.sleep(8)  # unter 8 Credits/Minute bleiben (Tarif-Limit, siehe Log 05.08.2026)
-
+        time.sleep(8)
     if not teile:
         raise RuntimeError("Keine Daten von Twelve Data erhalten - Tarif/Key prüfen.")
-
     stunden = pd.concat(teile)
-    stunden = stunden[~stunden.index.duplicated()].sort_index()
-    return stunden
+    return stunden[~stunden.index.duplicated()].sort_index()
 
 
-def backtest(stunden):
+def bestaetigte_swing_highs(stunden):
+    """DataFrame der bestätigten Swing-Highs.
+
+    Für einen Pivot an Position i braucht es SWING_FENSTER Bars rechts davon.
+    Der Pivot ist daher erst ab i+SWING_FENSTER bekannt – kein Lookahead.
+    """
+    high = stunden["High"].to_numpy()
+    idx = stunden.index
+    bestaetigt = []
+    f = SWING_FENSTER
+    for i in range(f, len(stunden) - f):
+        if high[i] >= np.max(high[i-f:i+f+1]):
+            bestaetigungs_index = i + f
+            bestaetigt.append((idx[bestaetigungs_index], float(high[i])))
+    return pd.DataFrame(bestaetigt, columns=["bekannt_ab", "preis"]).set_index("bekannt_ab") if bestaetigt else pd.DataFrame(columns=["preis"])
+
+
+def widerstaende_bis_zeitpunkt(swing_highs, zeit, entry, min_preis=None):
+    """Clustert nur bestätigte Swing-Highs, die zum Zeitpunkt `zeit` bekannt waren.
+    Eine Zone braucht mindestens WIDERSTAND_MIN_TREFFER Berührungen im 5-USD-Bucket.
+    """
+    if swing_highs.empty:
+        return []
+    bekannte = swing_highs.loc[swing_highs.index <= zeit, "preis"]
+    bekannte = bekannte[bekannte > (min_preis if min_preis is not None else entry)]
+    if bekannte.empty:
+        return []
+
+    buckets = {}
+    for preis in bekannte:
+        key = round(float(preis) / WIDERSTAND_BUCKET_USD) * WIDERSTAND_BUCKET_USD
+        buckets.setdefault(key, []).append(float(preis))
+    zonen = []
+    for werte in buckets.values():
+        if len(werte) >= WIDERSTAND_MIN_TREFFER:
+            zonen.append((float(np.mean(werte)), len(werte)))
+    zonen.sort(key=lambda x: x[0])
+    return zonen
+
+
+def bestimme_tps(variant, entry, stop, widerstaende):
+    r = entry - stop
+    tp1_2r = entry + 2 * r
+    tp2_3r = entry + 3 * r
+
+    if variant == "A":
+        return tp1_2r, tp2_3r, "2R/3R"
+
+    # Erste Widerstandszone mindestens 1R oberhalb Entry.
+    min_tp1 = entry + MIN_TP1_R * r
+    kandidaten = [(p, t) for p, t in widerstaende if p >= min_tp1]
+    if not kandidaten:
+        return None, None, "kein_geeigneter_widerstand"
+
+    tp1 = kandidaten[0][0]
+    rest = [(p, t) for p, t in kandidaten[1:] if p > tp1]
+    if not rest:
+        return None, None, "kein_2_widerstand"
+
+    naechster = rest[0][0]
+    if variant == "B":
+        tp2 = naechster
+    elif variant == "C":
+        tp2 = max(naechster, tp2_3r)
+    else:
+        raise ValueError(variant)
+
+    if tp2 <= tp1:
+        return None, None, "tp2_nicht_oberhalb_tp1"
+    return tp1, tp2, "charttechnisch"
+
+
+def backtest(stunden, variant, swing_highs):
     range_hoch_referenz = stunden["High"].rolling(RANGE_FENSTER).max().shift(1)
     range_tief_referenz = stunden["Low"].rolling(RANGE_FENSTER).min().shift(1)
 
     trades = []
     in_position = False
     entry = stop = tp1 = tp2 = None
+    initial_stop = None
     stufe = 0
     entry_zeit = None
     cooldown_bis = None
+    tp_typ = None
 
     for zeit, bar in stunden.iterrows():
-        hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+        hoch, tief, schluss = map(float, (bar["High"], bar["Low"], bar["Close"]))
         ref_hoch = range_hoch_referenz.get(zeit)
         ref_tief = range_tief_referenz.get(zeit)
 
@@ -153,26 +217,47 @@ def backtest(stunden):
             if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch):
                 entry = schluss
                 stop = float(ref_tief)
-                if stop < entry:
-                    risiko_pct = (entry - stop) / entry * 100
-                    if risiko_pct > MAX_STOP_ABSTAND_PCT:
+                initial_stop = stop
+                if stop >= entry:
+                    continue
+                risiko_pct = (entry - stop) / entry * 100
+                if risiko_pct > MAX_STOP_ABSTAND_PCT:
+                    continue
+
+                if variant == "A":
+                    tp1, tp2, tp_typ = bestimme_tps("A", entry, stop, [])
+                else:
+                    wz = widerstaende_bis_zeitpunkt(swing_highs, zeit, entry)
+                    tp1, tp2, tp_typ = bestimme_tps(variant, entry, stop, wz)
+                    if tp1 is None or tp2 is None:
+                        # Setup wird verworfen, wenn charttechnisch kein sauberer
+                        # TP1/TP2-Aufbau vorhanden ist. Kein künstliches 2R-Ersatz-Ziel.
                         continue
-                    r = entry - stop
-                    tp1 = entry + 2 * r
-                    tp2 = entry + 3 * r
-                    in_position = True
-                    stufe = 0
-                    entry_zeit = zeit
+
+                in_position = True
+                stufe = 0
+                entry_zeit = zeit
         else:
+            # Nach TP2: Stop laufend am bestätigten 24h-Tief nachziehen.
             if stufe == 2 and pd.notna(ref_tief):
                 stop = max(stop, float(ref_tief))
+
+            # Konservative Intrabar-Reihenfolge wie im bisherigen Backtest:
+            # Stop wird zuerst geprüft, wenn Stop und Ziel in derselben Kerze liegen.
             if tief <= stop:
+                ausstieg = stop
                 trades.append({
-                    "einstieg_zeit": entry_zeit, "ausstieg_zeit": zeit,
-                    "haltedauer_stunden": (zeit - entry_zeit).total_seconds() / 3600,
-                    "einstieg": entry, "ausstieg": stop,
-                    "ergebnis_pct": (stop - entry) / entry * 100,
+                    "variant": variant,
+                    "tp_typ": tp_typ,
+                    "einstieg_zeit": entry_zeit,
+                    "ausstieg_zeit": zeit,
+                    "haltedauer_stunden": (zeit-entry_zeit).total_seconds()/3600,
+                    "einstieg": entry, "stop_initial": initial_stop,
+                    "tp1": tp1, "tp2": tp2,
+                    "ausstieg": ausstieg,
+                    "ergebnis_pct": (ausstieg-entry)/entry*100,
                     "stufe_bei_ausstieg": stufe,
+                    "ergebnis_R": ((ausstieg-entry)/(entry-(float(range_tief_referenz.loc[entry_zeit])))) if pd.notna(range_tief_referenz.get(entry_zeit)) else np.nan,
                 })
                 in_position = False
                 cooldown_bis = zeit + pd.Timedelta(hours=COOLDOWN_STUNDEN)
@@ -187,49 +272,80 @@ def backtest(stunden):
         letzter_preis = float(stunden["Close"].iloc[-1])
         letzte_zeit = stunden.index[-1]
         trades.append({
+            "variant": variant, "tp_typ": tp_typ,
             "einstieg_zeit": entry_zeit, "ausstieg_zeit": letzte_zeit,
-            "haltedauer_stunden": (letzte_zeit - entry_zeit).total_seconds() / 3600,
-            "einstieg": entry, "ausstieg": letzter_preis,
-            "ergebnis_pct": (letzter_preis - entry) / entry * 100,
+            "haltedauer_stunden": (letzte_zeit-entry_zeit).total_seconds()/3600,
+            "einstieg": entry, "stop_initial": initial_stop,
+            "tp1": tp1, "tp2": tp2, "ausstieg": letzter_preis,
+            "ergebnis_pct": (letzter_preis-entry)/entry*100,
             "stufe_bei_ausstieg": stufe,
-            "hinweis": "Backtest endete waehrend offener Position - mit letztem verfuegbaren Kurs geschlossen.",
+            "hinweis": "Backtest endete waehrend offener Position",
         })
 
     return pd.DataFrame(trades)
+
+
+def statistik(df):
+    if df.empty:
+        return {"trades": 0, "trefferquote": 0, "summe": 0, "avg": 0, "avg_gew": 0, "avg_verl": 0,
+                "tp1": 0, "tp2": 0, "stop": 0, "breakeven": 0}
+    gew = df[df.ergebnis_pct > 0]
+    verl = df[df.ergebnis_pct < 0]
+    return {
+        "trades": len(df),
+        "trefferquote": len(gew)/len(df)*100,
+        "summe": df.ergebnis_pct.sum(),
+        "avg": df.ergebnis_pct.mean(),
+        "avg_gew": gew.ergebnis_pct.mean() if len(gew) else 0,
+        "avg_verl": verl.ergebnis_pct.mean() if len(verl) else 0,
+        "tp1": int((df.stufe_bei_ausstieg == 1).sum()),
+        "tp2": int((df.stufe_bei_ausstieg == 2).sum()),
+        "stop": int((df.stufe_bei_ausstieg == 0).sum()),
+        "breakeven": int((df.ergebnis_pct.abs() < 0.01).sum()),
+    }
 
 
 def main():
     stunden = hole_daten()
     print(f"\n{len(stunden)} Stundenkerzen geladen, {stunden.index.min()} bis {stunden.index.max()}")
     stunden.to_csv("range_ausbruch_stundendaten_roh.csv")
+    swing_highs = bestaetigte_swing_highs(stunden)
+    print(f"Bestätigte Swing-Highs für charttechnische TPs: {len(swing_highs)}")
 
-    trades_df = backtest(stunden)
-    if trades_df.empty:
-        print("Keine Trades im Backtest-Zeitraum gefunden.")
-        return
+    alle = []
+    ergebnisse = {}
+    labels = {"A": "A – 2R/3R (Referenz)", "B": "B – Charttechnisch", "C": "C – Hybrid"}
+    for variant in ("A", "B", "C"):
+        df = backtest(stunden, variant, swing_highs)
+        ergebnisse[variant] = df
+        if not df.empty:
+            df.to_csv(f"backtest_range_ausbruch_{variant}.csv", index=False)
+            alle.append(df)
+        s = statistik(df)
+        print(f"\n=== {labels[variant]} ===")
+        print(f"Trades: {s['trades']}")
+        print(f"Trefferquote: {s['trefferquote']:.1f}%")
+        print(f"Summe: {s['summe']:+.2f}%")
+        print(f"Ø Trade: {s['avg']:+.2f}%")
+        print(f"Ø Gewinner: {s['avg_gew']:+.2f}% | Ø Verlierer: {s['avg_verl']:+.2f}%")
+        print(f"Stop/BE: {s['stop']}/{s['breakeven']} | TP1: {s['tp1']} | TP2: {s['tp2']}")
 
-    trades_df.to_csv("backtest_range_ausbruch_trades.csv", index=False)
+    if alle:
+        vergleich = []
+        for variant in ("A", "B", "C"):
+            df = ergebnisse.get(variant, pd.DataFrame())
+            s = statistik(df)
+            s["variant"] = labels[variant]
+            vergleich.append(s)
+        pd.DataFrame(vergleich).to_csv("backtest_range_ausbruch_3varianten_vergleich.csv", index=False)
+        # Kompatibilitätsdatei für den bisherigen Workflow/Artifact-Namen: Referenz A.
+        ergebnisse["A"].to_csv("backtest_range_ausbruch_trades.csv", index=False)
 
-    n = len(trades_df)
-    gewinner = trades_df[trades_df["ergebnis_pct"] > 0]
-    verlierer = trades_df[trades_df["ergebnis_pct"] <= 0]
-    trefferquote = len(gewinner) / n * 100
-    avg_gewinn = gewinner["ergebnis_pct"].mean() if len(gewinner) else 0
-    avg_verlust = verlierer["ergebnis_pct"].mean() if len(verlierer) else 0
-    summe_pct = trades_df["ergebnis_pct"].sum()
-    avg_haltedauer = trades_df["haltedauer_stunden"].mean()
-
-    print(f"\n=== Backtest Range-Ausbruch (XAU/USD, 1h) ===")
-    print(f"Zeitraum: {trades_df['einstieg_zeit'].min()} bis {trades_df['ausstieg_zeit'].max()}")
-    print(f"Anzahl Trades: {n}")
-    print(f"Ø Haltedauer: {avg_haltedauer:.1f} Stunden")
-    print(f"Trefferquote: {trefferquote:.1f}%")
-    print(f"Ø Gewinn (Gewinner): {avg_gewinn:+.2f}%")
-    print(f"Ø Verlust (Verlierer): {avg_verlust:+.2f}%")
-    print(f"Summe aller Trades: {summe_pct:+.2f}%")
-    print(f"\nZum Vergleich Positionstrading V1e (Spot, Backtest Spot-Gold-Projekt): "
-          f"42 Trades, Trefferquote 19,0%, Summe +4,54% (Zeitraum 2019-2026)")
-    print(f"Trade-Log gespeichert: backtest_range_ausbruch_trades.csv")
+    print("\nDateien gespeichert:")
+    print("- backtest_range_ausbruch_A.csv")
+    print("- backtest_range_ausbruch_B.csv")
+    print("- backtest_range_ausbruch_C.csv")
+    print("- backtest_range_ausbruch_3varianten_vergleich.csv")
 
 
 if __name__ == "__main__":
