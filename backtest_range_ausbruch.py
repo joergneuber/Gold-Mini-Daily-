@@ -1,352 +1,268 @@
-"""
-Backtest Range-Ausbruch 1h – drei TP-Varianten für MINI DAILY GOLD
+#!/usr/bin/env python3
+# MINI DAILY GOLD – Range-Ausbruch 1h
+# TP-Backtest: A / C1 / C2 / C3
+#
+# A  = TP1 2R, TP2 3R
+# C1 = TP1 nächster bestätigter 1h-Widerstand >= 1R,
+#      TP2 max(nächster Widerstand, 3R)
+# C2 = TP1 nächster bestätigter 1h-Widerstand >= 1.5R,
+#      TP2 max(nächster Widerstand, 3R)
+# C3 = TP1 nächster bestätigter 1h-Widerstand >= 2R,
+#      TP2 max(nächster Widerstand, 3R)
+#
+# Entry/Stop-Regeln:
+# - Long only
+# - bestätigter Close über rollierendem 24h-Hoch
+# - Stop = 24h-Tief beim Entry
+# - Stop-Abstand > 0.60% => Trade wird abgelehnt
+# - Nach TP1: Stop auf Break-even
+# - Nach TP2: Stop auf TP1; danach 24h-Tief-Trailing
+# - 12h Cooldown nach Stop
+#
+# Das Skript erwartet range_ausbruch_stundendaten_roh.csv im selben
+# Verzeichnis bzw. im aktuellen Arbeitsverzeichnis.
 
-Gemeinsame Entry-/Stop-Regeln:
-- Long-only
-- Entry: bestätigter 1h-Schlusskurs über dem rollierenden 24h-Hoch
-- Stop: rollierendes 24h-Tief zum Entry
-- Stop-Abstand > 0,60 %: Trade wird abgelehnt (Stop wird nicht verschoben)
-- Cooldown nach Stop: 12 Stunden
-- TP1 erreicht -> Stop auf Breakeven
-- TP2 erreicht -> Stop auf TP1
-- danach Stop am aktuellen 24h-Tief nachziehen
-
-TP-Varianten:
-A = Referenz: TP1=2R, TP2=3R
-B = Charttechnisch: TP1=erste bestätigte 1h-Widerstandszone >= 1R,
-    TP2=darauffolgende bestätigte 1h-Widerstandszone
-C = Hybrid: TP1=erste bestätigte 1h-Widerstandszone >= 1R,
-    TP2=max(darauffolgende bestätigte 1h-Widerstandszone, 3R)
-
-WICHTIG: Widerstände werden ohne Lookahead bestimmt. Ein Swing-High wird erst
-fenster Stunden nach seiner Bildung als bestätigt betrachtet. Für einen Entry
-werden nur bis zum Entry-Zeitpunkt bestätigte Swing-Highs verwendet.
-"""
-
-import os
-import time
-from datetime import date, timedelta
-import requests
+from pathlib import Path
+import math
 import pandas as pd
 import numpy as np
 
-TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
-SYMBOL = "XAU/USD"
-INTERVALL = "1h"
-START_DATUM = date(2019, 1, 1)
-CHUNK_TAGE = 180
-RANGE_FENSTER = 24
-COOLDOWN_STUNDEN = 12
-MAX_STOP_ABSTAND_PCT = 0.60
+MAX_STOP_PCT = 0.006
+COOLDOWN_HOURS = 12
+CSV_CANDIDATES = [
+    Path("range_ausbruch_stundendaten_roh.csv"),
+    Path("backtest_results/range_ausbruch_stundendaten_roh.csv"),
+]
 
-# Charttechnische TP-Parameter
-SWING_FENSTER = 3              # 3 links + 3 rechts; erst danach bestätigt
-WIDERSTAND_BUCKET_USD = 5.0
-WIDERSTAND_MIN_TREFFER = 2
-MIN_TP1_R = 1.0
+def load_data():
+    path = next((p for p in CSV_CANDIDATES if p.exists()), None)
+    if path is None:
+        raise FileNotFoundError(
+            "range_ausbruch_stundendaten_roh.csv nicht gefunden. "
+            "Bitte die vorhandene Rohdaten-Datei ins Repo legen."
+        )
+    df = pd.read_csv(path)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    aliases = {
+        "datetime": ["datetime", "date", "timestamp", "time"],
+        "open": ["open"],
+        "high": ["high"],
+        "low": ["low"],
+        "close": ["close"],
+    }
+    rename = {}
+    for target, opts in aliases.items():
+        for opt in opts:
+            if opt in df.columns:
+                rename[opt] = target
+                break
+    df = df.rename(columns=rename)
+    required = ["datetime", "open", "high", "low", "close"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Fehlende Spalten: {missing}")
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    for c in ["open", "high", "low", "close"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=required).sort_values("datetime").drop_duplicates("datetime")
+    return df.reset_index(drop=True)
 
+def confirmed_swing_highs(df, left=2, right=2):
+    h = df["high"].to_numpy(float)
+    out = []
+    for i in range(left, len(df)-right):
+        v = h[i]
+        if v >= np.max(h[i-left:i]) and v > np.max(h[i+1:i+right+1]):
+            out.append((i, v))
+    return out
 
-def hole_api_key():
-    key = os.environ.get("TWELVEDATA_API_KEY")
-    if not key:
-        raise EnvironmentError("TWELVEDATA_API_KEY nicht gesetzt.")
-    return key
+def build_resistance_list(df):
+    swings = confirmed_swing_highs(df)
+    # A swing becomes usable only after right confirmation candles.
+    return [(i, float(v)) for i, v in swings]
 
-
-def hole_ausschnitt(api_key, start, ende, max_versuche=4):
-    for versuch in range(1, max_versuche + 1):
-        try:
-            antwort = requests.get(
-                TWELVEDATA_BASIS_URL,
-                params={
-                    "symbol": SYMBOL, "interval": INTERVALL, "apikey": api_key,
-                    "timezone": "UTC", "order": "ASC",
-                    "start_date": start.isoformat(), "end_date": ende.isoformat(),
-                    "outputsize": 5000,
-                },
-                timeout=60,
-            )
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-            wartezeit = min(30 * versuch, 90)
-            print(f"  Netzwerkfehler {start} bis {ende} (Versuch {versuch}/{max_versuche}): {exc}")
-            if versuch < max_versuche:
-                print(f"  Warte {wartezeit}s und versuche erneut...")
-                time.sleep(wartezeit)
-                continue
-            return pd.DataFrame()
-
-        try:
-            daten = antwort.json()
-        except ValueError:
-            antwort.raise_for_status()
-            raise RuntimeError(f"Unerwartete Antwort ohne JSON-Body: {antwort.text[:300]}")
-
-        if antwort.status_code == 429:
-            wartezeit = 65
-            print(f"  Rate-Limit bei {start} bis {ende} (Versuch {versuch}/{max_versuche}) - warte {wartezeit}s...")
-            time.sleep(wartezeit)
+def next_resistance(resistances, start_idx, min_price):
+    for idx, price in resistances:
+        if idx <= start_idx:
             continue
-        if antwort.status_code != 200 or daten.get("status") == "error":
-            print(f"  Kein Ausschnitt {start} bis {ende} (HTTP {antwort.status_code}): {daten.get('message', daten)}")
-            return pd.DataFrame()
-        if "values" not in daten:
-            return pd.DataFrame()
+        if price >= min_price:
+            return float(price), idx
+    return None, None
 
-        df = pd.DataFrame(daten["values"])
-        df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
-        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
-        for spalte in ("Open", "High", "Low", "Close"):
-            df[spalte] = df[spalte].astype(float)
-        return df.set_index("Datum").sort_index()[["Open", "High", "Low", "Close"]]
-
-    return pd.DataFrame()
-
-
-def hole_daten():
-    api_key = hole_api_key()
-    heute = date.today()
-    teile = []
-    fenster_start = START_DATUM
-    while fenster_start < heute:
-        fenster_ende = min(fenster_start + timedelta(days=CHUNK_TAGE - 1), heute)
-        print(f"Hole {fenster_start} bis {fenster_ende}...")
-        teil = hole_ausschnitt(api_key, fenster_start, fenster_ende)
-        if not teil.empty:
-            teile.append(teil)
-        fenster_start = fenster_ende + timedelta(days=1)
-        time.sleep(8)
-    if not teile:
-        raise RuntimeError("Keine Daten von Twelve Data erhalten - Tarif/Key prüfen.")
-    stunden = pd.concat(teile)
-    return stunden[~stunden.index.duplicated()].sort_index()
-
-
-def bestaetigte_swing_highs(stunden):
-    """DataFrame der bestätigten Swing-Highs.
-
-    Für einen Pivot an Position i braucht es SWING_FENSTER Bars rechts davon.
-    Der Pivot ist daher erst ab i+SWING_FENSTER bekannt – kein Lookahead.
-    """
-    high = stunden["High"].to_numpy()
-    idx = stunden.index
-    bestaetigt = []
-    f = SWING_FENSTER
-    for i in range(f, len(stunden) - f):
-        if high[i] >= np.max(high[i-f:i+f+1]):
-            bestaetigungs_index = i + f
-            bestaetigt.append((idx[bestaetigungs_index], float(high[i])))
-    return pd.DataFrame(bestaetigt, columns=["bekannt_ab", "preis"]).set_index("bekannt_ab") if bestaetigt else pd.DataFrame(columns=["preis"])
-
-
-def widerstaende_bis_zeitpunkt(swing_highs, zeit, entry, min_preis=None):
-    """Clustert nur bestätigte Swing-Highs, die zum Zeitpunkt `zeit` bekannt waren.
-    Eine Zone braucht mindestens WIDERSTAND_MIN_TREFFER Berührungen im 5-USD-Bucket.
-    """
-    if swing_highs.empty:
-        return []
-    bekannte = swing_highs.loc[swing_highs.index <= zeit, "preis"]
-    bekannte = bekannte[bekannte > (min_preis if min_preis is not None else entry)]
-    if bekannte.empty:
-        return []
-
-    buckets = {}
-    for preis in bekannte:
-        key = round(float(preis) / WIDERSTAND_BUCKET_USD) * WIDERSTAND_BUCKET_USD
-        buckets.setdefault(key, []).append(float(preis))
-    zonen = []
-    for werte in buckets.values():
-        if len(werte) >= WIDERSTAND_MIN_TREFFER:
-            zonen.append((float(np.mean(werte)), len(werte)))
-    zonen.sort(key=lambda x: x[0])
-    return zonen
-
-
-def bestimme_tps(variant, entry, stop, widerstaende):
-    r = entry - stop
-    tp1_2r = entry + 2 * r
-    tp2_3r = entry + 3 * r
-
-    if variant == "A":
-        return tp1_2r, tp2_3r, "2R/3R"
-
-    # Erste Widerstandszone mindestens 1R oberhalb Entry.
-    min_tp1 = entry + MIN_TP1_R * r
-    kandidaten = [(p, t) for p, t in widerstaende if p >= min_tp1]
-    if not kandidaten:
-        return None, None, "kein_geeigneter_widerstand"
-
-    tp1 = kandidaten[0][0]
-    rest = [(p, t) for p, t in kandidaten[1:] if p > tp1]
-    if not rest:
-        return None, None, "kein_2_widerstand"
-
-    naechster = rest[0][0]
-    if variant == "B":
-        tp2 = naechster
-    elif variant == "C":
-        tp2 = max(naechster, tp2_3r)
-    else:
-        raise ValueError(variant)
-
-    if tp2 <= tp1:
-        return None, None, "tp2_nicht_oberhalb_tp1"
-    return tp1, tp2, "charttechnisch"
-
-
-def backtest(stunden, variant, swing_highs):
-    range_hoch_referenz = stunden["High"].rolling(RANGE_FENSTER).max().shift(1)
-    range_tief_referenz = stunden["Low"].rolling(RANGE_FENSTER).min().shift(1)
-
+def simulate(df, variant, resistances):
     trades = []
-    in_position = False
-    entry = stop = tp1 = tp2 = None
-    initial_stop = None
-    stufe = 0
-    entry_zeit = None
-    cooldown_bis = None
-    tp_typ = None
+    i = 24
+    cooldown_until = None
 
-    for zeit, bar in stunden.iterrows():
-        hoch, tief, schluss = map(float, (bar["High"], bar["Low"], bar["Close"]))
-        ref_hoch = range_hoch_referenz.get(zeit)
-        ref_tief = range_tief_referenz.get(zeit)
+    while i < len(df)-2:
+        if cooldown_until is not None and df.loc[i, "datetime"] < cooldown_until:
+            i += 1
+            continue
 
-        if not in_position:
-            if cooldown_bis is not None and zeit < cooldown_bis:
-                continue
-            if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch):
-                entry = schluss
-                stop = float(ref_tief)
-                initial_stop = stop
-                if stop >= entry:
-                    continue
-                risiko_pct = (entry - stop) / entry * 100
-                if risiko_pct > MAX_STOP_ABSTAND_PCT:
-                    continue
+        # Entry: close breaks above rolling 24h high (previous 24 completed bars).
+        prior_high = df.loc[i-24:i-1, "high"].max()
+        if not (df.loc[i, "close"] > prior_high):
+            i += 1
+            continue
 
-                if variant == "A":
-                    tp1, tp2, tp_typ = bestimme_tps("A", entry, stop, [])
-                else:
-                    wz = widerstaende_bis_zeitpunkt(swing_highs, zeit, entry)
-                    tp1, tp2, tp_typ = bestimme_tps(variant, entry, stop, wz)
-                    if tp1 is None or tp2 is None:
-                        # Setup wird verworfen, wenn charttechnisch kein sauberer
-                        # TP1/TP2-Aufbau vorhanden ist. Kein künstliches 2R-Ersatz-Ziel.
-                        continue
+        entry = float(df.loc[i, "close"])
+        stop = float(df.loc[i-24:i, "low"].min())
+        risk = entry - stop
+        if risk <= 0:
+            i += 1
+            continue
 
-                in_position = True
-                stufe = 0
-                entry_zeit = zeit
+        stop_pct = risk / entry
+        if stop_pct > MAX_STOP_PCT:
+            i += 1
+            continue
+
+        r = risk
+        if variant == "A":
+            tp1 = entry + 2*r
+            tp2 = entry + 3*r
         else:
-            # Nach TP2: Stop laufend am bestätigten 24h-Tief nachziehen.
-            if stufe == 2 and pd.notna(ref_tief):
-                stop = max(stop, float(ref_tief))
+            threshold = {"C1": 1.0, "C2": 1.5, "C3": 2.0}[variant]
+            first_min = entry + threshold*r
+            r1, _ = next_resistance(resistances, i, first_min)
+            if r1 is None:
+                # No chart target => fall back to 2R for TP1.
+                r1 = entry + 2*r
+            tp1 = r1
 
-            # Konservative Intrabar-Reihenfolge wie im bisherigen Backtest:
-            # Stop wird zuerst geprüft, wenn Stop und Ziel in derselben Kerze liegen.
-            if tief <= stop:
-                ausstieg = stop
-                trades.append({
-                    "variant": variant,
-                    "tp_typ": tp_typ,
-                    "einstieg_zeit": entry_zeit,
-                    "ausstieg_zeit": zeit,
-                    "haltedauer_stunden": (zeit-entry_zeit).total_seconds()/3600,
-                    "einstieg": entry, "stop_initial": initial_stop,
-                    "tp1": tp1, "tp2": tp2,
-                    "ausstieg": ausstieg,
-                    "ergebnis_pct": (ausstieg-entry)/entry*100,
-                    "stufe_bei_ausstieg": stufe,
-                    "ergebnis_R": ((ausstieg-entry)/(entry-(float(range_tief_referenz.loc[entry_zeit])))) if pd.notna(range_tief_referenz.get(entry_zeit)) else np.nan,
-                })
-                in_position = False
-                cooldown_bis = zeit + pd.Timedelta(hours=COOLDOWN_STUNDEN)
-            elif stufe < 2 and hoch >= tp2:
-                stufe = 2
-                stop = max(stop, tp1)
-            elif stufe < 1 and hoch >= tp1:
-                stufe = 1
-                stop = max(stop, entry)
+            second_min = max(tp1, entry + 3*r)
+            r2, _ = next_resistance(resistances, i, second_min)
+            if r2 is None:
+                r2 = entry + 3*r
+            tp2 = r2
 
-    if in_position:
-        letzter_preis = float(stunden["Close"].iloc[-1])
-        letzte_zeit = stunden.index[-1]
+            # Ensure strict ordering.
+            if tp2 <= tp1:
+                tp2 = max(entry + 3*r, tp1)
+
+        state = "open"
+        current_stop = stop
+        tp1_hit = False
+        tp2_hit = False
+        exit_price = None
+        exit_reason = None
+        exit_idx = None
+
+        j = i + 1
+        while j < len(df):
+            row = df.loc[j]
+            high = float(row["high"])
+            low = float(row["low"])
+
+            # Conservative intrabar ordering: stop first if it was already active,
+            # then targets. This avoids assuming favorable ordering inside a bar.
+            if low <= current_stop:
+                exit_price = current_stop
+                exit_reason = "STOP" if not tp1_hit else "BE/STOP"
+                exit_idx = j
+                break
+
+            if not tp1_hit and high >= tp1:
+                tp1_hit = True
+                current_stop = entry
+
+            if tp1_hit and not tp2_hit and high >= tp2:
+                tp2_hit = True
+                current_stop = tp1
+                # Continue to allow trailing after TP2.
+
+            if tp2_hit:
+                # Trailing at the current 24h low, never below TP1.
+                trail = float(df.loc[max(0, j-23):j, "low"].min())
+                current_stop = max(tp1, trail)
+
+            j += 1
+
+        if exit_price is None:
+            exit_idx = len(df)-1
+            exit_price = float(df.loc[exit_idx, "close"])
+            exit_reason = "END"
+
+        ret = (exit_price / entry - 1.0) * 100.0
+
         trades.append({
-            "variant": variant, "tp_typ": tp_typ,
-            "einstieg_zeit": entry_zeit, "ausstieg_zeit": letzte_zeit,
-            "haltedauer_stunden": (letzte_zeit-entry_zeit).total_seconds()/3600,
-            "einstieg": entry, "stop_initial": initial_stop,
-            "tp1": tp1, "tp2": tp2, "ausstieg": letzter_preis,
-            "ergebnis_pct": (letzter_preis-entry)/entry*100,
-            "stufe_bei_ausstieg": stufe,
-            "hinweis": "Backtest endete waehrend offener Position",
+            "variant": variant,
+            "entry_time": df.loc[i, "datetime"],
+            "entry": entry,
+            "stop_initial": stop,
+            "stop_pct": stop_pct * 100,
+            "tp1": tp1,
+            "tp2": tp2,
+            "exit_time": df.loc[exit_idx, "datetime"],
+            "exit": exit_price,
+            "exit_reason": exit_reason,
+            "tp1_hit": tp1_hit,
+            "tp2_hit": tp2_hit,
+            "return_pct": ret,
         })
+
+        if exit_reason in ("STOP", "BE/STOP"):
+            cooldown_until = df.loc[exit_idx, "datetime"] + pd.Timedelta(hours=COOLDOWN_HOURS)
+        else:
+            cooldown_until = None
+
+        i = max(i + 1, exit_idx + 1)
 
     return pd.DataFrame(trades)
 
-
-def statistik(df):
-    if df.empty:
-        return {"trades": 0, "trefferquote": 0, "summe": 0, "avg": 0, "avg_gew": 0, "avg_verl": 0,
-                "tp1": 0, "tp2": 0, "stop": 0, "breakeven": 0}
-    gew = df[df.ergebnis_pct > 0]
-    verl = df[df.ergebnis_pct < 0]
+def summarize(t):
+    if t.empty:
+        return {
+            "Trades": 0, "Trefferquote": 0.0, "Summe_%": 0.0,
+            "Ø_Trade_%": 0.0, "Ø_Gewinner_%": 0.0, "Ø_Verlierer_%": 0.0,
+            "Stop_BE": 0, "TP1": 0, "TP2": 0
+        }
+    wins = t[t["return_pct"] > 1e-12]
+    losses = t[t["return_pct"] < -1e-12]
     return {
-        "trades": len(df),
-        "trefferquote": len(gew)/len(df)*100,
-        "summe": df.ergebnis_pct.sum(),
-        "avg": df.ergebnis_pct.mean(),
-        "avg_gew": gew.ergebnis_pct.mean() if len(gew) else 0,
-        "avg_verl": verl.ergebnis_pct.mean() if len(verl) else 0,
-        "tp1": int((df.stufe_bei_ausstieg == 1).sum()),
-        "tp2": int((df.stufe_bei_ausstieg == 2).sum()),
-        "stop": int((df.stufe_bei_ausstieg == 0).sum()),
-        "breakeven": int((df.ergebnis_pct.abs() < 0.01).sum()),
+        "Trades": len(t),
+        "Trefferquote": round(len(wins)/len(t)*100, 1),
+        "Summe_%": round(t["return_pct"].sum(), 2),
+        "Ø_Trade_%": round(t["return_pct"].mean(), 2),
+        "Ø_Gewinner_%": round(wins["return_pct"].mean(), 2) if len(wins) else 0.0,
+        "Ø_Verlierer_%": round(losses["return_pct"].mean(), 2) if len(losses) else 0.0,
+        "Stop_BE": int(t["exit_reason"].isin(["STOP","BE/STOP"]).sum()),
+        "TP1": int(t["tp1_hit"].sum()),
+        "TP2": int(t["tp2_hit"].sum()),
     }
 
-
 def main():
-    stunden = hole_daten()
-    print(f"\n{len(stunden)} Stundenkerzen geladen, {stunden.index.min()} bis {stunden.index.max()}")
-    stunden.to_csv("range_ausbruch_stundendaten_roh.csv")
-    swing_highs = bestaetigte_swing_highs(stunden)
-    print(f"Bestätigte Swing-Highs für charttechnische TPs: {len(swing_highs)}")
+    df = load_data()
+    print(f"Stundenkerzen geladen: {len(df)}, {df['datetime'].min()} bis {df['datetime'].max()}")
+    resistances = build_resistance_list(df)
+    print(f"Bestätigte Swing-Highs für charttechnische TPs: {len(resistances)}")
 
-    alle = []
-    ergebnisse = {}
-    labels = {"A": "A – 2R/3R (Referenz)", "B": "B – Charttechnisch", "C": "C – Hybrid"}
-    for variant in ("A", "B", "C"):
-        df = backtest(stunden, variant, swing_highs)
-        ergebnisse[variant] = df
-        if not df.empty:
-            df.to_csv(f"backtest_range_ausbruch_{variant}.csv", index=False)
-            alle.append(df)
-        s = statistik(df)
-        print(f"\n=== {labels[variant]} ===")
-        print(f"Trades: {s['trades']}")
-        print(f"Trefferquote: {s['trefferquote']:.1f}%")
-        print(f"Summe: {s['summe']:+.2f}%")
-        print(f"Ø Trade: {s['avg']:+.2f}%")
-        print(f"Ø Gewinner: {s['avg_gew']:+.2f}% | Ø Verlierer: {s['avg_verl']:+.2f}%")
-        print(f"Stop/BE: {s['stop']}/{s['breakeven']} | TP1: {s['tp1']} | TP2: {s['tp2']}")
+    all_trades = []
+    rows = []
 
-    if alle:
-        vergleich = []
-        for variant in ("A", "B", "C"):
-            df = ergebnisse.get(variant, pd.DataFrame())
-            s = statistik(df)
-            s["variant"] = labels[variant]
-            vergleich.append(s)
-        pd.DataFrame(vergleich).to_csv("backtest_range_ausbruch_3varianten_vergleich.csv", index=False)
-        # Kompatibilitätsdatei für den bisherigen Workflow/Artifact-Namen: Referenz A.
-        ergebnisse["A"].to_csv("backtest_range_ausbruch_trades.csv", index=False)
+    for variant, label in [
+        ("A", "A – 2R/3R (Referenz)"),
+        ("C1", "C1 – TP1 Widerstand >= 1R, TP2 max(Widerstand, 3R)"),
+        ("C2", "C2 – TP1 Widerstand >= 1.5R, TP2 max(Widerstand, 3R)"),
+        ("C3", "C3 – TP1 Widerstand >= 2R, TP2 max(Widerstand, 3R)"),
+    ]:
+        t = simulate(df, variant, resistances)
+        s = summarize(t)
+        rows.append({"Variante": label, **s})
+        all_trades.append(t)
+        print(f"=== {label} ===")
+        for k, v in s.items():
+            print(f"{k}: {v}")
 
-    print("\nDateien gespeichert:")
-    print("- backtest_range_ausbruch_A.csv")
-    print("- backtest_range_ausbruch_B.csv")
-    print("- backtest_range_ausbruch_C.csv")
-    print("- backtest_range_ausbruch_3varianten_vergleich.csv")
-
+    out = pd.DataFrame(rows)
+    out.to_csv("backtest_range_ausbruch_C1C2C3_vergleich.csv", index=False, encoding="utf-8-sig")
+    pd.concat(all_trades, ignore_index=True).to_csv(
+        "backtest_range_ausbruch_C1C2C3_trades.csv",
+        index=False, encoding="utf-8-sig"
+    )
+    print("Dateien gespeichert:")
+    print("- backtest_range_ausbruch_C1C2C3_vergleich.csv")
+    print("- backtest_range_ausbruch_C1C2C3_trades.csv")
 
 if __name__ == "__main__":
     main()
