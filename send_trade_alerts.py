@@ -61,13 +61,16 @@ def mailtext(event):
     system = event["system"]
     event_name = event["event"]
     zeit = datetime.fromisoformat(event["zeit"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Berlin"))
-    titel = {
-        "PREPARE": "🟡 GOLD LONG – VORBEREITEN",
-        "ENTRY": "🟢 GOLD LONG – ENTRY AUSGELÖST",
-        "TP1": "🟢 GOLD LONG – TP1 ERREICHT",
-        "TP2": "🟢 GOLD LONG – TP2 ERREICHT",
-        "STOP": "🔴 GOLD LONG – STOP ERREICHT",
-    }[event_name]
+    if event_name == "ENTRY" and event.get("alert_typ") == "ENTRY_VORMERKEN":
+        titel = "🟡 GOLD LONG – ENTRY VORMERKEN"
+    else:
+        titel = {
+            "PREPARE": "🟡 GOLD LONG – VORBEREITEN",
+            "ENTRY": "🟢 GOLD LONG – ENTRY AUSGELÖST",
+            "TP1": "🟢 GOLD LONG – TP1 ERREICHT",
+            "TP2": "🟢 GOLD LONG – TP2 ERREICHT",
+            "STOP": "🔴 GOLD LONG – STOP ERREICHT",
+        }[event_name]
 
     neue_stop = event["stop"]
     zeilen = [
@@ -103,11 +106,19 @@ def mailtext(event):
             "Jetzt Schein/Hebel auswählen und Kauf vorbereiten.",
         ])
     elif event_name == "ENTRY":
-        zeilen.extend([
-            "",
-            "🟢 JETZT IST DIE ENTRY-BEDINGUNG ERFÜLLT.",
-            "Kauf kann manuell ausgeführt werden.",
-        ])
+        if event.get("alert_typ") == "ENTRY_VORMERKEN":
+            zeilen.extend([
+                "",
+                "🟡 ENTRY IST BESTÄTIGT, ABER DER OPTIONSSCHEIN IST AKTUELL NICHT HANDELBAR.",
+                "Handelszeit: Montag-Freitag 08:00-22:00 Uhr (Europe/Berlin).",
+                "Ab 08:00 Uhr erneut prüfen, ob das Setup noch gültig ist. Kein Kauf ausserhalb der Handelszeit.",
+            ])
+        else:
+            zeilen.extend([
+                "",
+                "🟢 JETZT IST DIE ENTRY-BEDINGUNG ERFÜLLT.",
+                "Kauf kann manuell ausgeführt werden.",
+            ])
     zeilen.extend([
         "",
         f"Ereignis:   {event_name}",
