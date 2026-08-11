@@ -148,7 +148,7 @@ def _fallback_2026():
     ]
     return [
         {"name": n, "priority": p,
-         "datetime": datetime.fromisoformat(ts).replace(tzinfo=TZ_DE).isoformat(),
+         "datetime": datetime.fromisoformat(ts).replace(tzinfo=TZ_ET).astimezone(TZ_DE).isoformat(),
          "source": "Official-calendar fallback"}
         for n, p, ts in dates
     ]
@@ -246,8 +246,11 @@ def lade_termine(days_ahead: int = 14):
             errors.append(type(exc).__name__)
 
     all_events = _dedupe(all_events)
-    if not all_events:
-        all_events = _fallback_2026()
+    # Offizieller Feed darf den Fallback nicht "verdrängen", wenn er nur einen
+    # Teil der Termine liefert. Die bekannten High-Impact-Termine werden daher
+    # immer ergänzt und anschließend dedupliziert.
+    all_events.extend(_fallback_2026())
+    all_events = _dedupe(all_events)
 
     all_events = [e for e in all_events if now - timedelta(minutes=15) <= datetime.fromisoformat(e["datetime"]) <= end]
     if all_events:
