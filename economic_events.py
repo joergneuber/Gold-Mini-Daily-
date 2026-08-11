@@ -85,6 +85,75 @@ def _fetch_bls():
     return out
 
 
+
+def _fetch_bls_html():
+    """Robuster Fallback: liest den offiziellen BLS-Monatskalender als HTML.
+    Der BLS listet Datum, Uhrzeit und Release als Klartext; damit funktioniert
+    die Erkennung auch dann, wenn der ICS-Feed im GitHub-Runner nicht abrufbar ist.
+    """
+    now = datetime.now(TZ_DE)
+    out = []
+    months = [now.strftime("%m"), (now + timedelta(days=31)).strftime("%m")]
+    years = {now.strftime("%Y"), (now + timedelta(days=31)).strftime("%Y")}
+    for year in sorted(years):
+        for month in months:
+            url = f"https://www.bls.gov/schedule/{year}/{month}_sched_list.htm"
+            try:
+                html = _get(url)
+            except Exception:
+                continue
+            text = re.sub(r"<[^>]+>", " ", html)
+            text = re.sub(r"&nbsp;", " ", text, flags=re.I)
+            text = re.sub(r"\s+", " ", text)
+            pattern = re.compile(
+                r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+"
+                r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+                r"(\d{1,2}),\s+(\d{4})\s+(\d{1,2}:\d{2})\s+(AM|PM)\s+"
+                r"(.*?)(?=\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+|\s+NOTE:|$)",
+                re.I,
+            )
+            for m in pattern.finditer(text):
+                month, day, year_s, hhmm, ampm, desc = m.groups()
+                item = _classify_bls(desc)
+                if not item:
+                    continue
+                try:
+                    dt = datetime.strptime(
+                        f"{month} {day} {year_s} {hhmm} {ampm.upper()}",
+                        "%B %d %Y %I:%M %p",
+                    ).replace(tzinfo=TZ_ET)
+                except ValueError:
+                    continue
+                name, priority = item
+                out.append({
+                    "name": name,
+                    "priority": priority,
+                    "datetime": dt.astimezone(TZ_DE).isoformat(),
+                    "source": "BLS",
+                })
+    return out
+
+
+def _fallback_2026():
+    """Notfall-Fallback für die wichtigsten bereits offiziell terminierten
+    2026-Termine. Nur verwendet, wenn die offiziellen Feeds/Seiten nicht liefern."""
+    dates = [
+        ("US CPI", HIGH, "2026-08-12T08:30:00"),
+        ("US PPI", MEDIUM, "2026-08-13T08:30:00"),
+        ("US JOLTS", MEDIUM, "2026-09-01T10:00:00"),
+        ("US Employment Situation / NFP", HIGH, "2026-09-04T08:30:00"),
+        ("US CPI", HIGH, "2026-09-11T08:30:00"),
+        ("US PPI", MEDIUM, "2026-09-10T08:30:00"),
+        ("FOMC / Fed-Zinsentscheid", HIGH, "2026-09-16T14:00:00"),
+    ]
+    return [
+        {"name": n, "priority": p,
+         "datetime": datetime.fromisoformat(ts).replace(tzinfo=TZ_DE).isoformat(),
+         "source": "Official-calendar fallback"}
+        for n, p, ts in dates
+    ]
+
+
 def _fetch_bea():
     html = _get("https://www.bea.gov/news/schedule")
     text = re.sub(r"<[^>]+>", " ", html)
@@ -170,12 +239,17 @@ def lade_termine(days_ahead: int = 14):
     end = now + timedelta(days=days_ahead)
     all_events = []
     errors = []
-    for fetcher in (_fetch_bls, _fetch_bea, _fetch_fed):
+    for fetcher in (_fetch_bls, _fetch_bls_html, _fetch_bea, _fetch_fed):
         try:
             all_events.extend(fetcher())
         except Exception as exc:
             errors.append(type(exc).__name__)
-    all_events = [e for e in _dedupe(all_events) if now - timedelta(minutes=15) <= datetime.fromisoformat(e["datetime"]) <= end]
+
+    all_events = _dedupe(all_events)
+    if not all_events:
+        all_events = _fallback_2026()
+
+    all_events = [e for e in all_events if now - timedelta(minutes=15) <= datetime.fromisoformat(e["datetime"]) <= end]
     if all_events:
         try:
             CACHE_FILE.write_text(json.dumps({"updated_at": now.isoformat(), "events": all_events}, ensure_ascii=False, indent=2), encoding="utf-8")
