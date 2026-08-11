@@ -2090,7 +2090,7 @@ def main():
     with open("mini_daily_gold.txt", "w", encoding="utf-8") as f:
         f.write(text)
 
-    print(f"Realtime: {daten["realtime"]:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
+    print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(event_block.replace("\n", " | "))
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
