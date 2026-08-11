@@ -737,6 +737,22 @@ def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_tref
     return {"widerstandszonen": clustern(swing_highs), "supportzonen": clustern(swing_lows)}
 
 
+def finde_intraday_reaktionszonen_lokal(intraday_reihe, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3):
+    """Ermittelt schwächere lokale 1h-Reaktionszonen aus den letzten 36 Stunden.
+
+    Anders als die bestehenden Umkehrzonen dürfen bereits 2 bestätigte Swing-Reaktionen
+    genügen. Die Funktion ist bewusst nur für die lokale, kurzfristige Struktur gedacht
+    und ersetzt NICHT die stärkeren Umkehrzonen. Sie arbeitet ausschließlich mit den
+    übergebenen Vergangenheitsdaten und ist daher auch im Backtest ohne Look-ahead nutzbar.
+    """
+    if intraday_reihe is None or len(intraday_reihe) < 2 * fenster + min_treffer:
+        return {"widerstandszonen": [], "supportzonen": []}
+    lokal = intraday_reihe.tail(lookback_stunden)
+    return finde_intraday_umkehrzonen(
+        lokal, fenster=fenster, bucket_usd=bucket_usd, min_treffer=min_treffer, top_n=top_n
+    )
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -762,6 +778,9 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     # die Range-Box nur gezeigt wird, wenn sie sich mit einer Umkehrzone deckt - sonst
     # zeigen beide fast dieselbe Information doppelt und übereinander im Bild.
     umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe, top_n=2)
+    reaktionszonen_lokal = finde_intraday_reaktionszonen_lokal(
+        intraday_reihe, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3
+    )
     alle_umkehr_preise = (
         [p for p, _ in umkehrzonen["widerstandszonen"]]
         + [p for p, _ in umkehrzonen["supportzonen"]]
@@ -882,6 +901,23 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
             ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
             ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
                      color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
+
+    # Schwächere lokale Reaktionszonen: letzte 36h, mindestens 2 bestätigte Treffer.
+    # Sie werden bewusst getrennt von den starken Umkehrzonen dargestellt und
+    # innerhalb einer starken Umkehrzone nicht doppelt eingezeichnet.
+    def nahe_starker_zone(p, toleranz=5):
+        return any(abs(p - stark) <= toleranz for stark in alle_umkehr_preise)
+
+    for preis, treffer in reaktionszonen_lokal["widerstandszonen"]:
+        if y_unten <= preis <= y_oben and not in_box(preis) and not nahe_starker_zone(preis):
+            ax.axhline(preis, color="#d6a85f", linewidth=0.9, linestyle="-.", alpha=0.75)
+            ax.text(intraday_reihe.index[-1], preis, f"  Reaktionszone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#d6a85f", fontsize=7.5, va="bottom", ha="right")
+    for preis, treffer in reaktionszonen_lokal["supportzonen"]:
+        if y_unten <= preis <= y_oben and not in_box(preis) and not nahe_starker_zone(preis):
+            ax.axhline(preis, color="#d6a85f", linewidth=0.9, linestyle="-.", alpha=0.75)
+            ax.text(intraday_reihe.index[-1], preis, f"  Reaktionszone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                     color="#d6a85f", fontsize=7.5, va="bottom", ha="right")
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
@@ -1211,6 +1247,19 @@ def formatiere_positionstrading(status):
     return signal_text + "\n" + kontext
 
 
+def formatiere_berlin_zeitpunkt(zeit):
+    """Formatiert UTC/Pandas-Zeitstempel automatisch als Europe/Berlin (MEZ/MESZ)."""
+    if zeit is None:
+        return "-"
+    ts = pd.Timestamp(zeit)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    ts = ts.tz_convert(ZoneInfo("Europe/Berlin"))
+    sommer = bool(ts.dst() and ts.dst().total_seconds() != 0)
+    suffix = "MESZ" if sommer else "MEZ"
+    return f"{ts.strftime('%d.%m.%Y %H:%M')} {suffix}"
+
+
 def formatiere_range_ausbruch(status):
     """Wie formatiere_positionstrading(), aber für das Range-Ausbruch-Signal
     (Stunden statt Tage als Zeiteinheit)."""
@@ -1232,7 +1281,7 @@ def formatiere_range_ausbruch(status):
         stufe_text = {0: "noch kein Ziel erreicht", 1: "TP1 erreicht, Stop auf Breakeven",
                       2: "TP2 erreicht, Stop wird laufend nachgezogen"}[status["stufe"]]
         kontext = (
-            f"Simulierte Position seit {status['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC OFFEN "
+            f"Simulierte Position seit {formatiere_berlin_zeitpunkt(status['einstieg_zeit'])} OFFEN "
             f"({status['haltedauer_stunden']:.0f} Std.). Einstieg {de_zahl(status['einstieg'])} USD, "
             f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
             f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD, TP2 {de_zahl(status['tp2'])} USD "
@@ -1244,7 +1293,7 @@ def formatiere_range_ausbruch(status):
         if letzter:
             kontext = (
                 f"Keine offene Position{cooldown_text}. Letzter simulierter Trade: "
-                f"{letzter['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} bis {letzter['ausstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC, "
+                f"{formatiere_berlin_zeitpunkt(letzter['einstieg_zeit'])} bis {formatiere_berlin_zeitpunkt(letzter['ausstieg_zeit'])}, "
                 f"Ergebnis {de_zahl(letzter['ergebnis_pct'], vorzeichen=True)}%."
             )
         else:
@@ -1257,6 +1306,11 @@ def formatiere_range_ausbruch(status):
     vorschau_text = formatiere_vorschau(status, de_zahl)
     if vorschau_text:
         kontext += f"\n{vorschau_text}"
+
+    lokal = status.get("lokale_reaktionszonen") or {}
+    lokal_r = [p for p, _ in lokal.get("widerstandszonen", [])]
+    if lokal_r:
+        kontext += "\nLokale 1h-Reaktionszonen (36h, 2+ Treffer): " + ", ".join(de_zahl(p) for p in lokal_r) + " USD."
 
     return signal_text + "\n" + kontext
 
@@ -1658,26 +1712,48 @@ def bestaetigte_range_widerstaende(stunden, left=2, right=2):
 
 
 def range_tp_ziele_charttechnisch(stunden, swing_highs, entry_idx, entry, stop):
-    """C1-TP-Logik des MINI DAILY GOLD Range-Ausbruchs.
+    """Charttechnische TP-Logik des MINI DAILY GOLD Range-Ausbruchs.
 
-    TP1: nächster bereits bestätigter Swing-Widerstand >= 1R.
-    TP2: nächster bereits bestätigter Swing-Widerstand >= 3R.
-    Fallback auf 2R/3R, wenn kein passender Widerstand existiert.
+    TP1: nächste lokale 1h-Reaktionszone (letzte 36h, mindestens 2 Treffer),
+         sofern sie mindestens 1R entfernt liegt.
+    TP2: nächste starke, bestätigte Umkehrzone/Widerstandszone oberhalb von
+         mindestens 3R. Fallback bleibt die bisherige bestätigte Swing-Logik.
+
+    Es werden ausschließlich Daten bis zum Entry verwendet (kein Look-ahead).
     """
     r = entry - stop
     if r <= 0:
         return entry, entry
 
-    bekannte = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
-                       if bestaetigung <= entry_idx})
+    # Nur bis zum Entry bekannte Daten verwenden.
+    vergangen = stunden.iloc[:entry_idx + 1]
+    lokal = finde_intraday_reaktionszonen_lokal(
+        vergangen, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3
+    )
+    stark = finde_intraday_umkehrzonen(
+        vergangen, fenster=3, bucket_usd=5, min_treffer=2, top_n=5
+    )
 
     tp1_min = entry + 1.0 * r
-    tp1_kandidaten = [preis for preis in bekannte if preis >= tp1_min]
-    tp1 = min(tp1_kandidaten) if tp1_kandidaten else entry + 2.0 * r
+    lokale_tp1 = sorted({round(preis, 8) for preis, _ in lokal["widerstandszonen"]
+                         if preis >= tp1_min})
+    tp1 = lokale_tp1[0] if lokale_tp1 else None
 
     tp2_min = entry + 3.0 * r
-    tp2_kandidaten = [preis for preis in bekannte if preis >= tp2_min]
-    tp2 = min(tp2_kandidaten) if tp2_kandidaten else entry + 3.0 * r
+    starke_tp2 = sorted({round(preis, 8) for preis, _ in stark["widerstandszonen"]
+                         if preis >= tp2_min and (tp1 is None or preis > tp1)})
+    tp2 = starke_tp2[0] if starke_tp2 else None
+
+    # Fallback: bereits bestätigte Swing-Hochs wie bisher, ebenfalls ohne Look-ahead.
+    bekannte_swings = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
+                              if bestaetigung <= entry_idx})
+    if tp1 is None:
+        swing_tp1 = [preis for preis in bekannte_swings if preis >= tp1_min]
+        tp1 = min(swing_tp1) if swing_tp1 else entry + 2.0 * r
+    if tp2 is None:
+        swing_tp2 = [preis for preis in bekannte_swings
+                     if preis >= tp2_min and preis > tp1]
+        tp2 = min(swing_tp2) if swing_tp2 else entry + 3.0 * r
 
     if tp2 <= tp1:
         tp2 = max(tp1, entry + 3.0 * r)
@@ -1838,6 +1914,9 @@ def berechne_range_ausbruch_status():
                     "trade_zulaessig": risiko_pct <= RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT,
                 }
 
+        lokale_reaktionszonen = finde_intraday_reaktionszonen_lokal(
+            stunden, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3
+        )
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
@@ -1846,6 +1925,7 @@ def berechne_range_ausbruch_status():
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
             "vorschau": vorschau,
+            "lokale_reaktionszonen": lokale_reaktionszonen,
             "risiko_abgelehnt": risiko_abgelehnt,
             "event": aktuelles_event if aktuelles_event and aktuelles_event["zeit"] == letzte_zeit else None,
         }
@@ -2010,7 +2090,7 @@ def main():
     with open("mini_daily_gold.txt", "w", encoding="utf-8") as f:
         f.write(text)
 
-    print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
+    print(f"Realtime: {daten["realtime"]:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(event_block.replace("\n", " | "))
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
