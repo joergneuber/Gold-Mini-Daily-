@@ -512,6 +512,16 @@ def hole_saisonalitaet_text():
     return None
 
 
+def bestimme_tendenz_bezeichnung(jetzt=None):
+    """Bezeichnung der Gold-Tendenz passend zur Optionsschein-Handelszeit."""
+    jetzt = jetzt or datetime.now(ZoneInfo("Europe/Berlin"))
+    if jetzt.weekday() >= 5:
+        return "WOCHENEND-TENDENZ"
+    if 8 <= jetzt.hour < 22:
+        return "INTRADAY-TENDENZ"
+    return "OVERNIGHT-TENDENZ"
+
+
 def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
     zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}.
@@ -574,7 +584,7 @@ Intraday-Daten (kurzfristig):
 - Vortages-Tief: {daten['prev_low']:.2f} USD
 - Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
 - Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
-- Vorbörsliche Tendenz: {tendenz}
+- Tendenz ({bestimme_tendenz_bezeichnung()}): {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
@@ -727,6 +737,160 @@ def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_tref
     return {"widerstandszonen": clustern(swing_highs), "supportzonen": clustern(swing_lows)}
 
 
+def finde_intraday_reaktionszonen_lokal(intraday_reihe, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3):
+    """Ermittelt schwächere lokale 1h-Reaktionszonen aus den letzten 36 Stunden.
+
+    Anders als die bestehenden Umkehrzonen dürfen bereits 2 bestätigte Swing-Reaktionen
+    genügen. Die Funktion ist bewusst nur für die lokale, kurzfristige Struktur gedacht
+    und ersetzt NICHT die stärkeren Umkehrzonen. Sie arbeitet ausschließlich mit den
+    übergebenen Vergangenheitsdaten und ist daher auch im Backtest ohne Look-ahead nutzbar.
+    """
+    if intraday_reihe is None or len(intraday_reihe) < 2 * fenster + min_treffer:
+        return {"widerstandszonen": [], "supportzonen": []}
+    lokal = intraday_reihe.tail(lookback_stunden)
+    return finde_intraday_umkehrzonen(
+        lokal, fenster=fenster, bucket_usd=bucket_usd, min_treffer=min_treffer, top_n=top_n
+    )
+
+
+def finde_intraday_reaktionszonen_baender(
+    intraday_reihe,
+    fenster=2,
+    bucket_usd=6.0,
+    min_treffer=2,
+    top_n=8,
+    zonen_puffer_usd=2.0,
+    lookback_stunden=None,
+):
+    """Ermittelt echte Intraday-ReaktionsZONEN aus den 1h-Highs/-Lows.
+
+    Wichtig: Diese Funktion ist NUR für die Darstellung im Intraday-Chart gedacht.
+    Die bestehende Liniengrafik bleibt unverändert; hier werden zusätzlich echte
+    Preisbereiche statt einzelner exakter Linien erzeugt.
+
+    Logik:
+    - bestätigte Swing-Highs/-Lows aus den 1h-Daten;
+    - Preiscluster über 6-USD-Buckets;
+    - benachbarte Cluster werden nur bei engem Abstand zusammengeführt;
+    - mindestens 2 Reaktionen pro Zone;
+    - bis zu 8 Zonen je Richtung, damit auch ein Niveau wie ca. 4.360 USD
+      nicht allein wegen einer Rangfolge der Trefferzahlen verschwindet;
+    - die Zone wird aus den tatsächlichen Reaktionspreisen plus kleinem Puffer
+      gebildet, nicht als künstlich breites Prozentband;
+    - keine Änderung der Range-Ausbruch-, Pivot- oder Positionstrading-Logik.
+    """
+    if intraday_reihe is None or intraday_reihe.empty:
+        return {"widerstandszonen": [], "supportzonen": []}
+
+    if not {"High", "Low"}.issubset(intraday_reihe.columns):
+        return {"widerstandszonen": [], "supportzonen": []}
+
+    daten = intraday_reihe.tail(lookback_stunden) if lookback_stunden else intraday_reihe
+    if len(daten) < 2 * fenster + 1:
+        return {"widerstandszonen": [], "supportzonen": []}
+
+    high = daten["High"].astype(float).to_numpy()
+    low = daten["Low"].astype(float).to_numpy()
+    n = len(daten)
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(fenster, n - fenster):
+        hoch = high[i]
+        tief = low[i]
+
+        links_h = high[i - fenster:i]
+        rechts_h = high[i + 1:i + fenster + 1]
+        links_l = low[i - fenster:i]
+        rechts_l = low[i + 1:i + fenster + 1]
+
+        if hoch >= links_h.max() and hoch > rechts_h.max():
+            swing_highs.append((i, float(hoch)))
+
+        if tief <= links_l.min() and tief < rechts_l.min():
+            swing_lows.append((i, float(tief)))
+
+    def bilde_zonen(punkte):
+        if len(punkte) < min_treffer:
+            return []
+
+        # Erst in festen Preis-Buckets sammeln. Bei Gold um 4.000-4.500 USD
+        # sind 6 USD eng genug, um z.B. 4.342 und 4.360 getrennt zu halten.
+        buckets = {}
+        for index, preis in punkte:
+            key = round(preis / bucket_usd) * bucket_usd
+            buckets.setdefault(key, []).append((index, preis))
+
+        kandidaten = []
+        for key, gruppe in buckets.items():
+            if len(gruppe) < min_treffer:
+                continue
+            preise = [p for _, p in gruppe]
+            kandidaten.append({
+                "mittelpreis": float(np.mean(preise)),
+                "min_preis": float(min(preise)),
+                "max_preis": float(max(preise)),
+                "treffer": len(gruppe),
+                "punkte": gruppe,
+                "bucket": float(key),
+            })
+
+        # Benachbarte starke Cluster zusammenführen, aber nur wenn deren
+        # Mittelpunkte höchstens 8 USD auseinanderliegen. Damit bleiben
+        # beispielsweise 4.342 und 4.360 getrennte Zonen.
+        kandidaten.sort(key=lambda z: z["mittelpreis"])
+        zusammen = []
+        for zone in kandidaten:
+            if not zusammen:
+                zusammen.append(zone)
+                continue
+
+            letzte = zusammen[-1]
+            if abs(zone["mittelpreis"] - letzte["mittelpreis"]) <= 8.0:
+                alle_punkte = letzte["punkte"] + zone["punkte"]
+                preise = [p for _, p in alle_punkte]
+                letzte["mittelpreis"] = float(np.mean(preise))
+                letzte["min_preis"] = float(min(preise))
+                letzte["max_preis"] = float(max(preise))
+                letzte["treffer"] = len(alle_punkte)
+                letzte["punkte"] = alle_punkte
+            else:
+                zusammen.append(zone)
+
+        ergebnis = []
+        for zone in zusammen:
+            preise = [p for _, p in zone["punkte"]]
+            mittel = zone["mittelpreis"]
+
+            # Kleiner fester Puffer plus die tatsächlich beobachtete Spanne.
+            # Dadurch wird aus 4.358/4.360/4.364 z.B. eine klar lesbare
+            # Reaktionszone um ca. 4.361 statt einer 1-Dollar-Linie.
+            unterkante = min(zone["min_preis"], mittel - zonen_puffer_usd)
+            oberkante = max(zone["max_preis"], mittel + zonen_puffer_usd)
+
+            letzter_index = max(i for i, _ in zone["punkte"])
+            erster_index = min(i for i, _ in zone["punkte"])
+
+            ergebnis.append({
+                "mittelpreis": mittel,
+                "unterkante": float(unterkante),
+                "oberkante": float(oberkante),
+                "treffer": zone["treffer"],
+                "erster_index": erster_index,
+                "letzter_index": letzter_index,
+            })
+
+        # Stärke zuerst; bei gleicher Trefferzahl die jüngere Zone zuerst.
+        ergebnis.sort(key=lambda z: (-z["treffer"], -z["letzter_index"]))
+        return ergebnis[:top_n]
+
+    return {
+        "widerstandszonen": bilde_zonen(swing_highs),
+        "supportzonen": bilde_zonen(swing_lows),
+    }
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -751,11 +915,24 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     # Umkehrzonen vorab berechnen (wird weiter unten auch fürs Zeichnen genutzt), damit
     # die Range-Box nur gezeigt wird, wenn sie sich mit einer Umkehrzone deckt - sonst
     # zeigen beide fast dieselbe Information doppelt und übereinander im Bild.
-    umkehrzonen = finde_intraday_umkehrzonen(intraday_reihe, top_n=2)
-    alle_umkehr_preise = (
-        [p for p, _ in umkehrzonen["widerstandszonen"]]
-        + [p for p, _ in umkehrzonen["supportzonen"]]
+    # NEU: echte Intraday-Reaktionszonen als Preisbereiche.
+    # Der bestehende gelbe Close-Linienchart bleibt unverändert.
+    # Mehrere Zonen je Richtung verhindern, dass ein relevantes Niveau
+    # wie ca. 4.360 USD nur wegen einer stärkeren 4.342-Zone ausgeblendet wird.
+    reaktionszonen_chart = finde_intraday_reaktionszonen_baender(
+        intraday_reihe,
+        fenster=2,
+        bucket_usd=6.0,
+        min_treffer=2,
+        top_n=8,
+        zonen_puffer_usd=2.0,
     )
+
+    alle_reaktionszonen = (
+        reaktionszonen_chart["widerstandszonen"]
+        + reaktionszonen_chart["supportzonen"]
+    )
+    alle_umkehr_preise = [z["mittelpreis"] for z in alle_reaktionszonen]
 
     # Range-Box: Widerstand + Support, die beide mehrfach berührt wurden (Swing-Hochs/
     # -Tiefs in 20-Min-Fenstern, min. 2 Berührungen je Seite) - anders als die reine
@@ -844,8 +1021,8 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
 
     # Tatsächliches Intraday-Hoch/-Tief zusätzlich als schlichte Referenzlinien -
     # ergänzt die rechnerischen Pivot-Level um die real erreichten Extrempunkte.
-    intraday_hoch = preise.max()
-    intraday_tief = preise.min()
+    intraday_hoch = intraday_reihe["High"].max()
+    intraday_tief = intraday_reihe["Low"].min()
     ax.axhline(intraday_hoch, color="#c9c2b0", linewidth=0.9, linestyle=":", alpha=0.7)
     ax.text(intraday_reihe.index[0], intraday_hoch, "Tageshoch  ", color="#c9c2b0",
              fontsize=8.5, va="bottom", ha="left")
@@ -853,25 +1030,82 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
              fontsize=8.5, va="top", ha="left")
 
-    # Umkehrzonen zeichnen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
-    # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala nicht
-    # erneut aufblähen. Eigene Farbe (Blau) statt Creme, unterscheidbar von der Range-Box.
-    # Zonen INNERHALB einer bereits gezeichneten Range-Box werden übersprungen - die
-    # Box deckt diesen Preisbereich schon ab, eine zusätzliche Linie wäre redundant
-    # und sorgt nur für überlappende Beschriftungen.
-    def in_box(p):
-        return box_bereich is not None and box_bereich[0] <= p <= box_bereich[1]
+    # ============================================================
+    # INTRADAY-REAKTIONSZONEN
+    # ============================================================
+    # Keine Candlesticks und keine Änderung der gelben Kurslinie.
+    # Reaktionszonen werden als echte Preisbereiche dargestellt.
+    # Zonen innerhalb der Range-Box werden nicht doppelt gezeichnet.
+    def zone_ueberlappt_box(zone):
+        if box_bereich is None:
+            return False
+        return (
+            zone["unterkante"] <= box_bereich[1]
+            and zone["oberkante"] >= box_bereich[0]
+        )
 
-    for preis, treffer in umkehrzonen["widerstandszonen"]:
-        if y_unten <= preis <= y_oben and not in_box(preis):
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
-            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
-    for preis, treffer in umkehrzonen["supportzonen"]:
-        if y_unten <= preis <= y_oben and not in_box(preis):
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
-            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
+    def zeichne_zone(zone):
+        if zone["oberkante"] < y_unten or zone["unterkante"] > y_oben:
+            return
+        if zone_ueberlappt_box(zone):
+            return
+
+        unterkante = max(zone["unterkante"], y_unten)
+        oberkante = min(zone["oberkante"], y_oben)
+        mittel = zone["mittelpreis"]
+        treffer = zone["treffer"]
+
+        # Transparenter Preisbereich statt einer künstlichen exakten Linie.
+        ax.axhspan(
+            unterkante,
+            oberkante,
+            facecolor="#6fa8dc",
+            alpha=0.12,
+            zorder=2,
+        )
+
+        ax.axhline(
+            unterkante,
+            color="#6fa8dc",
+            linewidth=0.8,
+            linestyle="-",
+            alpha=0.55,
+            zorder=3,
+        )
+        ax.axhline(
+            oberkante,
+            color="#6fa8dc",
+            linewidth=0.8,
+            linestyle="-",
+            alpha=0.55,
+            zorder=3,
+        )
+        ax.axhline(
+            mittel,
+            color="#6fa8dc",
+            linewidth=1.0,
+            linestyle="-",
+            alpha=0.75,
+            zorder=3,
+        )
+
+        text = f"Reaktionszone {mittel:,.0f} ({treffer}x)".replace(",", ".")
+        ax.text(
+            intraday_reihe.index[-1],
+            mittel,
+            f"  {text}",
+            color="#6fa8dc",
+            fontsize=7.5,
+            va="center",
+            ha="left",
+            zorder=8,
+        )
+
+    for zone in reaktionszonen_chart["widerstandszonen"]:
+        zeichne_zone(zone)
+
+    for zone in reaktionszonen_chart["supportzonen"]:
+        zeichne_zone(zone)
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
@@ -1201,6 +1435,19 @@ def formatiere_positionstrading(status):
     return signal_text + "\n" + kontext
 
 
+def formatiere_berlin_zeitpunkt(zeit):
+    """Formatiert UTC/Pandas-Zeitstempel automatisch als Europe/Berlin (MEZ/MESZ)."""
+    if zeit is None:
+        return "-"
+    ts = pd.Timestamp(zeit)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    ts = ts.tz_convert(ZoneInfo("Europe/Berlin"))
+    sommer = bool(ts.dst() and ts.dst().total_seconds() != 0)
+    suffix = "MESZ" if sommer else "MEZ"
+    return f"{ts.strftime('%d.%m.%Y %H:%M')} {suffix}"
+
+
 def formatiere_range_ausbruch(status):
     """Wie formatiere_positionstrading(), aber für das Range-Ausbruch-Signal
     (Stunden statt Tage als Zeiteinheit)."""
@@ -1222,7 +1469,7 @@ def formatiere_range_ausbruch(status):
         stufe_text = {0: "noch kein Ziel erreicht", 1: "TP1 erreicht, Stop auf Breakeven",
                       2: "TP2 erreicht, Stop wird laufend nachgezogen"}[status["stufe"]]
         kontext = (
-            f"Simulierte Position seit {status['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC OFFEN "
+            f"Simulierte Position seit {formatiere_berlin_zeitpunkt(status['einstieg_zeit'])} OFFEN "
             f"({status['haltedauer_stunden']:.0f} Std.). Einstieg {de_zahl(status['einstieg'])} USD, "
             f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
             f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD, TP2 {de_zahl(status['tp2'])} USD "
@@ -1234,7 +1481,7 @@ def formatiere_range_ausbruch(status):
         if letzter:
             kontext = (
                 f"Keine offene Position{cooldown_text}. Letzter simulierter Trade: "
-                f"{letzter['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} bis {letzter['ausstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC, "
+                f"{formatiere_berlin_zeitpunkt(letzter['einstieg_zeit'])} bis {formatiere_berlin_zeitpunkt(letzter['ausstieg_zeit'])}, "
                 f"Ergebnis {de_zahl(letzter['ergebnis_pct'], vorzeichen=True)}%."
             )
         else:
@@ -1247,6 +1494,11 @@ def formatiere_range_ausbruch(status):
     vorschau_text = formatiere_vorschau(status, de_zahl)
     if vorschau_text:
         kontext += f"\n{vorschau_text}"
+
+    lokal = status.get("lokale_reaktionszonen") or {}
+    lokal_r = [p for p, _ in lokal.get("widerstandszonen", [])]
+    if lokal_r:
+        kontext += "\nLokale 1h-Reaktionszonen (36h, 2+ Treffer): " + ", ".join(de_zahl(p) for p in lokal_r) + " USD."
 
     return signal_text + "\n" + kontext
 
@@ -1283,7 +1535,7 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
 MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
-VORBOERSLICHE TENDENZ
+{bestimme_tendenz_bezeichnung()}
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
 {event_block}
@@ -1384,9 +1636,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     {warnblock}
     <hr style="border-color:#3a3226;">
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">{bestimme_tendenz_bezeichnung()}</h3>
     <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
-    <div style="background:#2e1f14;border-left:3px solid #d9a441;padding:10px 14px;margin:12px 0;white-space:pre-line;line-height:1.45;">{event_block}</div>
+    <div style="background:#2e1f14;border-left:3px solid #d9a441;padding:10px 14px;margin:12px 0;white-space:pre-line;">{event_block.replace(chr(10), "<br>")}</div>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
     {szenarien_html}
@@ -1648,26 +1900,48 @@ def bestaetigte_range_widerstaende(stunden, left=2, right=2):
 
 
 def range_tp_ziele_charttechnisch(stunden, swing_highs, entry_idx, entry, stop):
-    """C1-TP-Logik des MINI DAILY GOLD Range-Ausbruchs.
+    """Charttechnische TP-Logik des MINI DAILY GOLD Range-Ausbruchs.
 
-    TP1: nächster bereits bestätigter Swing-Widerstand >= 1R.
-    TP2: nächster bereits bestätigter Swing-Widerstand >= 3R.
-    Fallback auf 2R/3R, wenn kein passender Widerstand existiert.
+    TP1: nächste lokale 1h-Reaktionszone (letzte 36h, mindestens 2 Treffer),
+         sofern sie mindestens 1R entfernt liegt.
+    TP2: nächste starke, bestätigte Umkehrzone/Widerstandszone oberhalb von
+         mindestens 3R. Fallback bleibt die bisherige bestätigte Swing-Logik.
+
+    Es werden ausschließlich Daten bis zum Entry verwendet (kein Look-ahead).
     """
     r = entry - stop
     if r <= 0:
         return entry, entry
 
-    bekannte = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
-                       if bestaetigung <= entry_idx})
+    # Nur bis zum Entry bekannte Daten verwenden.
+    vergangen = stunden.iloc[:entry_idx + 1]
+    lokal = finde_intraday_reaktionszonen_lokal(
+        vergangen, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3
+    )
+    stark = finde_intraday_umkehrzonen(
+        vergangen, fenster=3, bucket_usd=5, min_treffer=2, top_n=5
+    )
 
     tp1_min = entry + 1.0 * r
-    tp1_kandidaten = [preis for preis in bekannte if preis >= tp1_min]
-    tp1 = min(tp1_kandidaten) if tp1_kandidaten else entry + 2.0 * r
+    lokale_tp1 = sorted({round(preis, 8) for preis, _ in lokal["widerstandszonen"]
+                         if preis >= tp1_min})
+    tp1 = lokale_tp1[0] if lokale_tp1 else None
 
     tp2_min = entry + 3.0 * r
-    tp2_kandidaten = [preis for preis in bekannte if preis >= tp2_min]
-    tp2 = min(tp2_kandidaten) if tp2_kandidaten else entry + 3.0 * r
+    starke_tp2 = sorted({round(preis, 8) for preis, _ in stark["widerstandszonen"]
+                         if preis >= tp2_min and (tp1 is None or preis > tp1)})
+    tp2 = starke_tp2[0] if starke_tp2 else None
+
+    # Fallback: bereits bestätigte Swing-Hochs wie bisher, ebenfalls ohne Look-ahead.
+    bekannte_swings = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
+                              if bestaetigung <= entry_idx})
+    if tp1 is None:
+        swing_tp1 = [preis for preis in bekannte_swings if preis >= tp1_min]
+        tp1 = min(swing_tp1) if swing_tp1 else entry + 2.0 * r
+    if tp2 is None:
+        swing_tp2 = [preis for preis in bekannte_swings
+                     if preis >= tp2_min and preis > tp1]
+        tp2 = min(swing_tp2) if swing_tp2 else entry + 3.0 * r
 
     if tp2 <= tp1:
         tp2 = max(tp1, entry + 3.0 * r)
@@ -1828,6 +2102,9 @@ def berechne_range_ausbruch_status():
                     "trade_zulaessig": risiko_pct <= RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT,
                 }
 
+        lokale_reaktionszonen = finde_intraday_reaktionszonen_lokal(
+            stunden, lookback_stunden=36, fenster=2, bucket_usd=5, min_treffer=2, top_n=3
+        )
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
@@ -1836,6 +2113,7 @@ def berechne_range_ausbruch_status():
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
             "vorschau": vorschau,
+            "lokale_reaktionszonen": lokale_reaktionszonen,
             "risiko_abgelehnt": risiko_abgelehnt,
             "event": aktuelles_event if aktuelles_event and aktuelles_event["zeit"] == letzte_zeit else None,
         }
@@ -1942,7 +2220,6 @@ def main():
     pivots = klassische_pivots(daten["prev_high"], daten["prev_low"], daten["prev_close"])
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
     event_block, event_data = economic_events.briefing_block(days_ahead=7)
-    print(event_block)
 
     zonen_je_zeitraum = {}
     daily_lang = None
@@ -2002,6 +2279,7 @@ def main():
         f.write(text)
 
     print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
+    print(event_block.replace("\n", " | "))
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
     print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png, chart_tages.png, chart_langfrist.png")
