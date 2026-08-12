@@ -582,7 +582,7 @@ Intraday-Daten (kurzfristig):
 - Vortages-Tief: {daten['prev_low']:.2f} USD
 - Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
 - Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
-- Vorbörsliche Tendenz: {tendenz}
+- Aktuelle Tendenz: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
@@ -1600,7 +1600,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     {warnblock}
     <hr style="border-color:#3a3226;">
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Aktuelle Tendenz</h3>
     <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
