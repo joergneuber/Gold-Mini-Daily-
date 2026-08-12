@@ -2061,6 +2061,151 @@ def berechne_range_ausbruch_status():
         }
 
 
+# --------------------------------------------------------------------------
+# SCHATTENLAUF C3@1,00% (12.08.2026): rein informatives Vergleichssignal zum
+# Range-Ausbruch-System oben. Backtest-Kennzahlen (2020-01-24 bis 2026-08-10,
+# Gesamthistorie): 152 Trades, Trefferquote 34,9%, Summe +88,34%. Out-of-
+# Sample (letzte 18 Monate, nicht fuer die Auswahl benutzt): 40 Trades,
+# Trefferquote 45,0%, Summe +41,72%. Laengste historische Verlustserie:
+# 13 Trades in Folge. Wird NUR geloggt (siehe SCHATTENLAUF-Zeile in main()) -
+# fliesst NICHT in Report, Chart, Mail oder Trade-Alerts ein und aendert am
+# Live-System RANGE_AUSBRUCH_1H (C1@0,60%) nichts.
+SCHATTEN_C3_MAX_STOP_ABSTAND_PCT = 1.00
+SCHATTEN_C3_MIN_R_TP1 = 2.0
+
+
+def schatten_c3_tp_ziele(stunden, swing_highs, entry_idx, entry, stop):
+    """C3-TP-Logik: TP1 erst ab einem bereits bestaetigten Swing-Widerstand
+    >= 2R (statt >= 1R bei der Live-Variante C1), TP2 weiterhin >= 3R.
+    Fallback auf 2R/3R, wenn kein passender Widerstand existiert."""
+    r = entry - stop
+    if r <= 0:
+        return entry, entry
+
+    bekannte = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
+                       if bestaetigung <= entry_idx})
+
+    tp1_min = entry + SCHATTEN_C3_MIN_R_TP1 * r
+    tp1_kandidaten = [preis for preis in bekannte if preis >= tp1_min]
+    tp1 = min(tp1_kandidaten) if tp1_kandidaten else entry + 2.0 * r
+
+    tp2_min = entry + 3.0 * r
+    tp2_kandidaten = [preis for preis in bekannte if preis >= tp2_min]
+    tp2 = min(tp2_kandidaten) if tp2_kandidaten else entry + 3.0 * r
+
+    if tp2 <= tp1:
+        tp2 = max(tp1, entry + 3.0 * r)
+
+    return float(tp1), float(tp2)
+
+
+def berechne_schatten_c3_status():
+    """Simuliert C3@1,00% parallel zum Live-System, rein fuer den Log-Hinweis
+    in main(). Eigene Twelve-Data-Anfrage (bewusst getrennt von
+    berechne_range_ausbruch_status(), um dort nichts aendern zu muessen)."""
+    start = (pd.Timestamp.now() - pd.Timedelta(days=RANGE_AUSBRUCH_HISTORIE_TAGE)).strftime("%Y-%m-%d")
+    stunden = hole_zeitreihe(INTRADAY_INTERVALL, start_date=start, outputsize=5000)
+    if len(stunden) < RANGE_AUSBRUCH_FENSTER + 5:
+        return {"status": "keine_daten"}
+
+    swing_highs = bestaetigte_range_widerstaende(stunden, left=2, right=2)
+    range_hoch_referenz = stunden["High"].rolling(RANGE_AUSBRUCH_FENSTER).max().shift(1)
+    range_tief_referenz = stunden["Low"].rolling(RANGE_AUSBRUCH_FENSTER).min().shift(1)
+
+    in_position = False
+    entry = stop = tp1 = tp2 = None
+    stufe = 0
+    entry_zeit = None
+    cooldown_bis = None
+    letzter_abgeschlossener_trade = None
+
+    for zeit, bar in stunden.iterrows():
+        hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+        ref_hoch = range_hoch_referenz.get(zeit)
+        ref_tief = range_tief_referenz.get(zeit)
+
+        if not in_position:
+            if cooldown_bis is not None and zeit < cooldown_bis:
+                continue
+            if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch):
+                entry = schluss
+                stop = float(ref_tief)
+                if stop < entry:
+                    risiko_pct = (entry - stop) / entry * 100
+                    if risiko_pct > SCHATTEN_C3_MAX_STOP_ABSTAND_PCT:
+                        continue
+                    tp1, tp2 = schatten_c3_tp_ziele(
+                        stunden, swing_highs, stunden.index.get_loc(zeit), entry, stop
+                    )
+                    in_position = True
+                    stufe = 0
+                    entry_zeit = zeit
+        else:
+            if stufe == 2 and pd.notna(ref_tief):
+                stop = max(stop, float(ref_tief))
+            if tief <= stop:
+                letzter_abgeschlossener_trade = {
+                    "einstieg_zeit": entry_zeit, "ausstieg_zeit": zeit,
+                    "ergebnis_pct": (stop - entry) / entry * 100,
+                }
+                in_position = False
+                cooldown_bis = zeit + pd.Timedelta(hours=RANGE_AUSBRUCH_COOLDOWN_STUNDEN)
+            elif stufe < 2 and hoch >= tp2:
+                stufe = 2
+                stop = max(stop, tp1)
+            elif stufe < 1 and hoch >= tp1:
+                stufe = 1
+                stop = max(stop, entry)
+
+    letzter_kurs = float(stunden["Close"].iloc[-1])
+    letzte_zeit = stunden.index[-1]
+
+    if in_position and entry_zeit < SIGNAL_NEUSTART_DATUM:
+        in_position = False
+    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_zeit"] < SIGNAL_NEUSTART_DATUM:
+        letzter_abgeschlossener_trade = None
+
+    if in_position:
+        return {
+            "status": "offen",
+            "einstieg_zeit": entry_zeit, "einstieg": entry,
+            "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe,
+            "aktueller_kurs": letzter_kurs,
+            "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
+        }
+    return {
+        "status": "keine_position",
+        "aktueller_kurs": letzter_kurs,
+        "letzter_trade": letzter_abgeschlossener_trade,
+        "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
+    }
+
+
+def logge_schattenlauf_c3(status):
+    """Reiner Log-Hinweis (z. B. sichtbar im GitHub-Actions-Log) - kein
+    Report-/Mail-/Alert-Inhalt. Siehe Kommentarblock oben."""
+    if status.get("status") == "keine_daten":
+        print("[SCHATTENLAUF C3@1,00%] Keine Daten - Schattenlauf uebersprungen.")
+        return
+    if status.get("status") == "offen":
+        print(
+            f"[SCHATTENLAUF C3@1,00%] Offene Schatten-Position (nicht live gehandelt): "
+            f"Einstieg {status['einstieg']:.2f} USD am {status['einstieg_zeit']}, "
+            f"Stop {status['stop']:.2f} USD, TP1 {status['tp1']:.2f} USD, TP2 {status['tp2']:.2f} USD, "
+            f"Stufe {status['stufe']}, unrealisiert {status['unrealisiert_pct']:+.2f}%."
+        )
+        return
+    letzter = status.get("letzter_trade")
+    if letzter:
+        print(
+            f"[SCHATTENLAUF C3@1,00%] Keine offene Schatten-Position. Letzter simulierter "
+            f"Schatten-Trade: {letzter['einstieg_zeit']} bis {letzter['ausstieg_zeit']}, "
+            f"Ergebnis {letzter['ergebnis_pct']:+.2f}%."
+        )
+    else:
+        print("[SCHATTENLAUF C3@1,00%] Keine offene Schatten-Position, bisher kein simulierter Schatten-Trade.")
+
+
 # Alert-Vertrag: ENTRY/TP1/TP2/STOP werden fuer 1h und Tageschart als separate
 # Ereignisse geschrieben. Die Mail liefert immer Gold-Entry, Gold-Stop, TP1, TP2;
 # beim 1h-Setup zusaetzlich das harte Maximalrisiko von 0,60 %. WKN, Produkt und
@@ -2192,6 +2337,9 @@ def main():
 
     range_ausbruch_status = berechne_range_ausbruch_status()
     print(f"Range-Ausbruch-Status: {range_ausbruch_status['status']}")
+
+    # Schattenlauf C3@1,00% - rein Log, siehe Kommentarblock bei der Funktion.
+    logge_schattenlauf_c3(berechne_schatten_c3_status())
 
     intraday_reaktionszonen = finde_intraday_reaktionszonen_baender(
         daten["intraday_reihe"],
