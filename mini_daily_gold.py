@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import requests
 from google import genai
+import economic_events
 
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
@@ -1470,7 +1471,7 @@ def formatiere_range_ausbruch(status):
 
 
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status):
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, event_block):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -1503,6 +1504,8 @@ MINI DAILY: GOLD
 {warnzeile}
 VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
+
+{event_block}
 
 SZENARIEN
 {szenarien_text}
@@ -1540,7 +1543,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, event_block):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -1602,6 +1605,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Aktuelle Tendenz</h3>
     <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
+
+    <div style="background:#2e1f14;border-left:3px solid #d9a441;padding:10px 14px;margin:12px 0;white-space:pre-line;">{event_block.replace(chr(10), "<br>")}</div>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
     {szenarien_html}
@@ -2156,6 +2161,7 @@ def main():
     daten = hole_kursdaten()
     pivots = klassische_pivots(daten["prev_high"], daten["prev_low"], daten["prev_close"])
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
+    event_block, event_data = economic_events.briefing_block(days_ahead=7)
 
     zonen_je_zeitraum = {}
     daily_lang = None
@@ -2231,8 +2237,8 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status)
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, event_block)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, event_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
@@ -2242,6 +2248,7 @@ def main():
     print(f"Realtime: {daten['realtime']:.2f} USD | Tendenz: {tendenz_label} ({tendenz_pct:+.2f}%)")
     print(f"Widerstände: {pivots['r']}")
     print(f"Unterstützungen: {pivots['s']}")
+    print(event_block.replace("\n", " | "))
     print("Report geschrieben: mini_daily_gold.html, mini_daily_gold.txt, chart.png, chart_tages.png, chart_langfrist.png")
 
 
