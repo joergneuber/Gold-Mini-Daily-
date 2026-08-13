@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import requests
 from google import genai
+from economic_events import briefing_block
 
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
@@ -1323,7 +1324,7 @@ def formatiere_range_ausbruch(status):
 
 
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status):
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -1354,6 +1355,9 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
 MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
+WICHTIGE US-MARKT-EVENTS
+{economic_events_block}
+
 VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
@@ -1393,7 +1397,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -1411,6 +1415,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     positionstrading_text = formatiere_positionstrading(positionstrading_status)
     range_ausbruch_text = formatiere_range_ausbruch(range_ausbruch_status)
+    economic_events_html = economic_events_block.replace("\n", "<br>")
 
     def fmt(n):
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -1451,6 +1456,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <h1 style="color:#e8b95c;font-family:serif;margin-top:0;">Mini Daily: Gold</h1>
     <p style="color:#a89d87;">{heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr</p>
     {warnblock}
+    <div style="background:#2a1d14;border-left:3px solid #d9a441;padding:10px 14px;color:#e8c98a;font-size:12.5px;line-height:1.5;margin:10px 0 16px 0;">
+    {economic_events_html}
+    </div>
     <hr style="border-color:#3a3226;">
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
@@ -1928,6 +1936,7 @@ def main():
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
     szenarien = berechne_szenarien(daten["realtime"], pivots)
+    economic_events_block, _ = briefing_block(days_ahead=7)
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien)
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
@@ -1963,8 +1972,8 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status)
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
