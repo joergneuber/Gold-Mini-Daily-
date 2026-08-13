@@ -14,6 +14,7 @@ genutzt) nur Tages-OHLC liefert, kein Intraday-Intervall.
 """
 
 import os
+import json
 import sys
 import time
 from datetime import datetime, timezone
@@ -69,6 +70,12 @@ VOLATILITAETS_FENSTER_KURZ_TAGE = 14
 VOLATILITAETS_FENSTER_LANG_TAGE = 100
 VOLATILITAETS_FENSTER_KURZ_STUNDEN = 14
 VOLATILITAETS_FENSTER_LANG_STUNDEN = 200
+
+# Trade-Alert-Vorwarnung: rein für die Mail-Logik, verändert keine
+# Signalberechnung und keine Entry-/Exit-Regel. Eine PREPARE-Mail wird nur
+# gesendet, wenn der aktuelle Schlusskurs höchstens 0,5 % vom jeweiligen
+# bestätigten Entry-Trigger entfernt ist und noch keine Position offen ist.
+TRADE_ALERT_PREPARE_ABSTAND_PCT = 0.5
 
 
 def berechne_atr(daten, fenster):
@@ -1532,6 +1539,7 @@ def berechne_positionstrading_status():
     entry_datum = None
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
+    letztes_alert_event = None
     alle_trades = []  # sammelt jeden abgeschlossenen Trade für die Live-Backtest-Kennzahlen im Footer
 
     for datum, bar in daily.iterrows():
@@ -1555,6 +1563,10 @@ def berechne_positionstrading_status():
                         in_position = True
                         stufe = 0
                         entry_datum = datum
+                        letztes_alert_event = {
+                            "event": "ENTRY", "zeit": datum.isoformat(),
+                            "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                        }
         else:
             if stufe == 2 and pd.notna(ref_tief):
                 stop = max(stop, float(ref_tief))
@@ -1564,14 +1576,26 @@ def berechne_positionstrading_status():
                     "ergebnis_pct": (stop - entry) / entry * 100,
                 }
                 alle_trades.append(letzter_abgeschlossener_trade["ergebnis_pct"])
+                letztes_alert_event = {
+                    "event": "STOP", "zeit": datum.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
                 in_position = False
                 cooldown_bis = datum + pd.Timedelta(days=POSITIONSTRADING_COOLDOWN_TAGE)
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
+                letztes_alert_event = {
+                    "event": "TP2", "zeit": datum.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
+                letztes_alert_event = {
+                    "event": "TP1", "zeit": datum.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
 
     def backtest_kennzahlen_text():
         """Baut den Footer-Satz live aus alle_trades statt aus einer fest
@@ -1611,6 +1635,7 @@ def berechne_positionstrading_status():
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_tage": (letztes_datum - entry_datum).days,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
+            "_alert_event": (letztes_alert_event if letztes_alert_event and letztes_alert_event["zeit"] == letztes_datum.isoformat() else None),
         }
     else:
         # War der AUSSTIEG (Stop) genau die letzte (heutige) Kerze -> heute
@@ -1659,6 +1684,28 @@ def berechne_positionstrading_status():
                         daily["Close"].to_numpy(), POSITIONSTRADING_TREND_FENSTER, letzter_kurs
                     )
 
+        alert_event = None
+        if (
+            heutiges_signal == "KEIN_SIGNAL"
+            and not (cooldown_bis is not None and letztes_datum < cooldown_bis)
+            and vorschau is not None
+            and vorschau.get("trend_erfuellt") is True
+        ):
+            trigger = float(vorschau["stop"])
+            aktueller = float(letzter_kurs)
+            abstand_pct = abs(aktueller - trigger) / trigger * 100 if trigger else 999.0
+            if aktueller >= trigger and abstand_pct <= TRADE_ALERT_PREPARE_ABSTAND_PCT:
+                alert_event = {
+                    "event": "PREPARE",
+                    "zeit": letztes_datum.isoformat(),
+                    "einstieg": float(vorschau["hypothetischer_einstieg"]),
+                    "stop": float(vorschau["stop"]),
+                    "tp1": float(vorschau["tp1"]),
+                    "tp2": float(vorschau["tp2"]),
+                    "trigger_typ": "Swing-Tief-Bounce",
+                    "trigger_abstand_pct": abstand_pct,
+                }
+
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
@@ -1666,6 +1713,7 @@ def berechne_positionstrading_status():
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
             "vorschau": vorschau,
+            "_alert_event": alert_event,
         }
 
 
@@ -1695,6 +1743,7 @@ def berechne_range_ausbruch_status():
     entry_zeit = None
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
+    letztes_alert_event = None
 
     for zeit, bar in stunden.iterrows():
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
@@ -1715,6 +1764,10 @@ def berechne_range_ausbruch_status():
                     in_position = True
                     stufe = 0
                     entry_zeit = zeit
+                    letztes_alert_event = {
+                        "event": "ENTRY", "zeit": zeit.isoformat(),
+                        "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                    }
         else:
             if stufe == 2 and pd.notna(ref_tief):
                 stop = max(stop, float(ref_tief))
@@ -1723,14 +1776,26 @@ def berechne_range_ausbruch_status():
                     "einstieg_zeit": entry_zeit, "ausstieg_zeit": zeit,
                     "ergebnis_pct": (stop - entry) / entry * 100,
                 }
+                letztes_alert_event = {
+                    "event": "STOP", "zeit": zeit.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
                 in_position = False
                 cooldown_bis = zeit + pd.Timedelta(hours=RANGE_AUSBRUCH_COOLDOWN_STUNDEN)
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
+                letztes_alert_event = {
+                    "event": "TP2", "zeit": zeit.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
+                letztes_alert_event = {
+                    "event": "TP1", "zeit": zeit.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
 
     letzter_kurs = float(stunden["Close"].iloc[-1])
     letzte_zeit = stunden.index[-1]
@@ -1753,6 +1818,7 @@ def berechne_range_ausbruch_status():
             "aktueller_kurs": letzter_kurs,
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_stunden": (letzte_zeit - entry_zeit).total_seconds() / 3600,
+            "_alert_event": (letztes_alert_event if letztes_alert_event and letztes_alert_event["zeit"] == letzte_zeit.isoformat() else None),
         }
     else:
         heutiges_signal = "VERKAUF"
@@ -1780,13 +1846,67 @@ def berechne_range_ausbruch_status():
                     "tp2": ref_hoch_aktuell + 3 * r,
                 }
 
+        alert_event = None
+        if (
+            heutiges_signal == "KEIN_SIGNAL"
+            and not (cooldown_bis is not None and letzte_zeit < cooldown_bis)
+            and vorschau is not None
+        ):
+            trigger = float(vorschau["hypothetischer_einstieg"])
+            aktueller = float(letzter_kurs)
+            abstand_pct = (trigger - aktueller) / trigger * 100 if trigger else 999.0
+            if 0 <= abstand_pct <= TRADE_ALERT_PREPARE_ABSTAND_PCT:
+                alert_event = {
+                    "event": "PREPARE",
+                    "zeit": letzte_zeit.isoformat(),
+                    "einstieg": trigger,
+                    "stop": float(vorschau["stop"]),
+                    "tp1": float(vorschau["tp1"]),
+                    "tp2": float(vorschau["tp2"]),
+                    "trigger_typ": "24h-Hoch-Ausbruch",
+                    "trigger_abstand_pct": abstand_pct,
+                }
+
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
             "vorschau": vorschau,
+            "_alert_event": alert_event,
         }
+
+
+def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
+    """Schreibt ausschließlich die aktuell neu auslösbaren Trade-Events.
+    Die Signalberechnung bleibt vollständig in den beiden Statusfunktionen;
+    diese Funktion übersetzt nur deren letzten Event-/Vorwarnungszustand in
+    das von send_trade_alerts.py erwartete JSON-Format.
+    """
+    events = []
+    for system, status in (
+        ("POSITIONSTRADING", positionstrading_status),
+        ("RANGE_AUSBRUCH_1H", range_ausbruch_status),
+    ):
+        event = status.get("_alert_event") if isinstance(status, dict) else None
+        if not event:
+            continue
+        event = dict(event)
+        event["system"] = system
+        if event["event"] == "PREPARE":
+            event_id = (
+                f"{system}:PREPARE:"
+                f"{float(event['einstieg']):.2f}:"
+                f"{float(event['stop']):.2f}"
+            )
+        else:
+            event_id = f"{system}:{event['event']}:{event['zeit']}"
+        event["event_id"] = event_id
+        events.append(event)
+
+    with open("trade_alerts.json", "w", encoding="utf-8") as f:
+        json.dump({"events": events}, f, ensure_ascii=False, indent=2)
+    print(f"Trade-Alerts geschrieben: {len(events)} Event(s)")
 
 
 def main():
@@ -1832,6 +1952,8 @@ def main():
 
     positionstrading_status = berechne_positionstrading_status()
     print(f"Positionstrading-Status: {positionstrading_status['status']}")
+
+    schreibe_trade_alerts(positionstrading_status, range_ausbruch_status)
 
     # Für den neuen Tageschart reicht ein 12-Monats-Ausschnitt (genug für 50-Tage-
     # Trend + 10-Tage-Swing-Tief-Referenz, aber übersichtlicher als die vollen
