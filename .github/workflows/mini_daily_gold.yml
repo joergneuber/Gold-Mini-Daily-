@@ -41,7 +41,7 @@ jobs:
             # Toleranzfenster 0-30 Minuten nach der Zielzeit (Sicherheitspuffer
             # fuer verzoegerte GitHub-Cron-Trigger; die Zielzeiten liegen
             # mindestens 2,5h auseinander, daher kein Ueberlappungsrisiko).
-            if [ "$diff" -ge 0 ] && [ "$diff" -le 30 ]; then
+            if [ "$diff" -ge 0 ] && [ "$diff" -le 60 ]; then
               soll=true
             fi
           done
