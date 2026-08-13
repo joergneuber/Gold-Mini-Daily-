@@ -934,22 +934,19 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     # Umkehrzonen zeichnen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
     # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala nicht
     # erneut aufblähen. Eigene Farbe (Blau) statt Creme, unterscheidbar von der Range-Box.
-    # Zonen INNERHALB einer bereits gezeichneten Range-Box werden übersprungen - die
-    # Box deckt diesen Preisbereich schon ab, eine zusätzliche Linie wäre redundant
-    # und sorgt nur für überlappende Beschriftungen.
-    def in_box(p):
-        return box_bereich is not None and box_bereich[0] <= p <= box_bereich[1]
-
+    # Die bestehenden Umkehrzonen werden IMMER gezeichnet, auch wenn sie innerhalb einer
+    # Range-Box liegen. Dadurch bleiben sie als eigenständige, bestätigte Level sichtbar.
+    # Hoher zorder stellt zusätzlich sicher, dass eine Trendlinie sie nicht optisch überdeckt.
     for preis, treffer in umkehrzonen["widerstandszonen"]:
-        if y_unten <= preis <= y_oben and not in_box(preis):
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
+        if y_unten <= preis <= y_oben:
+            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6, zorder=6)
             ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
+                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=6)
     for preis, treffer in umkehrzonen["supportzonen"]:
-        if y_unten <= preis <= y_oben and not in_box(preis):
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
+        if y_unten <= preis <= y_oben:
+            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6, zorder=6)
             ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
+                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=6)
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
