@@ -48,13 +48,13 @@ POSITIONSTRADING_SWING_FENSTER = 10
 POSITIONSTRADING_COOLDOWN_TAGE = 3
 
 # "Neustart" der SIGNAL-ANZEIGE (nicht der Backtest-Kennzahlen!) ab diesem Datum,
-# auf Wunsch des Nutzers (05.08.2026): wir gehen davon aus, dass bis dahin kein
+# auf Wunsch des Nutzers (13.08.2026): wir gehen davon aus, dass bis dahin kein
 # tatsächlicher Auftrag erteilt wurde. Eine Position, die die Simulation schon
 # VOR diesem Datum als eröffnet ansieht, wird für die SIGNAL-Zeile nicht mehr
 # als "aktuell offen" ausgewiesen, und ein abgeschlossener Trade davor nicht
 # mehr als "letzter Trade" gezeigt - auch wenn die Simulation selbst (für
 # korrekte Trend-/Referenzberechnung) weiterhin die volle Historie durchläuft.
-SIGNAL_NEUSTART_DATUM = pd.Timestamp("2026-08-05", tz="UTC")
+SIGNAL_NEUSTART_DATUM = pd.Timestamp("2026-08-13", tz="UTC")
 
 # Volatilitätsfilter (05.08.2026, Sicherheitsnetz für V1e UND Range-Ausbruch):
 # beide bestehenden Signale sind Trendfolge-/Ausbruchssysteme und kaufen in
