@@ -668,7 +668,7 @@ def finde_range_boxen(preisreihe, fenster=5, bucket_usd=30, min_treffer=2, segme
     return boxen
 
 
-def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_treffer=2, top_n=3):
+def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=15, min_treffer=2, top_n=3):
     """Analog zu analysiere_reaktionszonen (die für Tagesdaten schon existiert), aber
     auf Intraday-Kerzen angewendet: findet Swing-Hochs/-Tiefs und gruppiert sie zu
     Umkehrzonen mit mehreren Berührungen. Anders als finde_range_box werden hier
@@ -931,22 +931,35 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
              fontsize=8.5, va="top", ha="left")
 
-    # Umkehrzonen zeichnen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
-    # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala nicht
-    # erneut aufblähen. Eigene Farbe (Blau) statt Creme, unterscheidbar von der Range-Box.
-    # Die bestehenden Umkehrzonen werden IMMER gezeichnet, auch wenn sie innerhalb einer
-    # Range-Box liegen. Dadurch bleiben sie als eigenständige, bestätigte Level sichtbar.
-    # Hoher zorder stellt zusätzlich sicher, dass eine Trendlinie sie nicht optisch überdeckt.
+    # Umkehrzonen zeichnen: 15-USD-Buckets als sichtbare Preiszone.
+    # Die bisherige Umkehrzonen-Erkennung bleibt unverändert; nur die Bucket-Breite
+    # und die Darstellung werden angepasst. Die Mittellinie markiert den berechneten
+    # mittleren Preis der bestätigten Swing-Punkte.
+    def in_box(p):
+        return box_bereich is not None and box_bereich[0] <= p <= box_bereich[1]
+
+    BUCKET_UMKEHR_USD = 15.0
+    HALBES_BUCKET = BUCKET_UMKEHR_USD / 2.0
+
     for preis, treffer in umkehrzonen["widerstandszonen"]:
-        if y_unten <= preis <= y_oben:
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6, zorder=6)
-            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=6)
+        if y_unten <= preis <= y_oben and not in_box(preis):
+            zone_unten = preis - HALBES_BUCKET
+            zone_oben = preis + HALBES_BUCKET
+            ax.axhspan(zone_unten, zone_oben, color="#6fa8dc", alpha=0.10, zorder=2)
+            ax.axhline(preis, color="#6fa8dc", linewidth=1.2, linestyle="-", alpha=0.85, zorder=6)
+            ax.text(intraday_reihe.index[-1], preis,
+                    f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                    color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=6)
+
     for preis, treffer in umkehrzonen["supportzonen"]:
-        if y_unten <= preis <= y_oben:
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6, zorder=6)
-            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=6)
+        if y_unten <= preis <= y_oben and not in_box(preis):
+            zone_unten = preis - HALBES_BUCKET
+            zone_oben = preis + HALBES_BUCKET
+            ax.axhspan(zone_unten, zone_oben, color="#6fa8dc", alpha=0.10, zorder=2)
+            ax.axhline(preis, color="#6fa8dc", linewidth=1.2, linestyle="-", alpha=0.85, zorder=6)
+            ax.text(intraday_reihe.index[-1], preis,
+                    f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                    color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=6)
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
