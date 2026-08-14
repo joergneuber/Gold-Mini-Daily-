@@ -547,7 +547,7 @@ Intraday-Daten (kurzfristig):
 - Vortages-Tief: {daten['prev_low']:.2f} USD
 - Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
 - Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
-- Tendenz zum Schlusskurs: {tendenz}
+- Vorbörsliche Tendenz: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
@@ -1489,7 +1489,7 @@ MINI DAILY: GOLD
 WICHTIGE US-MARKT-EVENTS
 {economic_events_block}
 
-TENDENZ (ZUM SCHLUSSKURS)
+VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
 SZENARIEN
@@ -1504,7 +1504,7 @@ UNTERSTUETZUNGEN (INTRADAY)
 REALTIME INDIKATION
 {fmt(daten['realtime'])} USD
 
-SCHLUSSKURS
+SCHLUSSKURS (VORTAG)
 {fmt(daten['prev_close'])} USD
 
 RUECKBLICK
@@ -1553,7 +1553,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     def level_liste(werte, farbe):
         return "".join(
-            f'<span class="level-item" style="border-left:3px solid {farbe};">'
+            f'<span style="display:inline-block;background:#241f16;border-left:3px solid {farbe};'
+            f'padding:6px 12px;margin:4px 6px 4px 0;border-radius:2px;font-family:monospace;">'
             f'{v:,.2f}</span>'.replace(",", "X").replace(".", ",").replace("X", ".")
             for v in werte
         )
@@ -1562,8 +1563,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     def szenario_zeile(emoji, label, farbe, hintergrund, bedingung, ziel):
         return (
-            f'<p class="scenario-row" style="background:{hintergrund};border-left:3px solid {farbe};">'
-            f'{emoji} <strong>{label}</strong> {bedingung}{ziel}</p>'
+            f'<p style="background:{hintergrund};border-left:3px solid {farbe};padding:8px 14px;'
+            f'margin:4px 0;">{emoji} <strong>{label}</strong> {bedingung}{ziel}</p>'
         )
 
     szenarien_html = ""
@@ -1591,75 +1592,29 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </div>
     <hr style="border-color:#3a3226;">
 
-    <style>
-      .market-snapshot { display:table; width:100%; table-layout:fixed; border-spacing:0; margin:16px 0 18px 0; }
-      .market-card { display:table-cell; width:33.333%; vertical-align:top; box-sizing:border-box; border:1px solid #3a3226; border-radius:5px; background:#17140f; padding:14px 16px 13px 16px; }
-      .market-card + .market-card { border-left:0; border-top-left-radius:0; border-bottom-left-radius:0; }
-      .market-card:first-child { border-top-right-radius:0; border-bottom-right-radius:0; }
-      .market-card-label { color:#a89d87; font-size:12px; letter-spacing:1px; text-transform:uppercase; line-height:1.25; margin:0 0 8px 0; white-space:normal; }
-      .market-card-value { margin:0; font-family:serif; font-size:24px; line-height:1.2; white-space:nowrap; }
-      .market-card-realtime .market-card-value { color:#e8b95c; font-size:27px; }
-      .market-card-tendency .market-card-value { font-size:21px; }
-      .scenario-row { padding:8px 12px; margin:4px 0; line-height:1.4; font-size:13px; overflow-wrap:anywhere; }
-      .level-grid { display:table; width:100%; table-layout:fixed; border-spacing:0 6px; }
-      .level-col { display:table-cell; width:50%; vertical-align:top; padding-right:18px; }
-      .level-col:last-child { padding-right:0; padding-left:18px; }
-      .level-list { display:block; }
-      .level-item { display:inline-block; box-sizing:border-box; white-space:nowrap; padding:6px 12px; margin:0 6px 4px 0; background:#241f16; border-radius:2px; font-family:monospace; font-size:12px; }
-      .chart-grid { display:table; width:100%; table-layout:fixed; border-spacing:12px 0; margin:22px -12px 24px -12px; }
-      .chart-card { display:table-cell; width:33.333%; vertical-align:top; border:1px solid #3a3226; border-radius:5px; background:#17140f; padding:10px; box-sizing:border-box; }
-      .chart-card h3 { color:#ece6d9; font-family:serif; font-size:13px; letter-spacing:.3px; margin:0 0 8px 0; }
-      .chart-card img { display:block; width:100%; height:auto; border:0; }
-    </style>
-
-    <div class="market-snapshot">
-      <div class="market-card market-card-realtime">
-        <p class="market-card-label">Realtime Indikation</p>
-        <p class="market-card-value">{daten['realtime']:,.2f} USD</p>
-      </div>
-      <div class="market-card market-card-tendency">
-        <p class="market-card-label">Tendenz (zum Schlusskurs)</p>
-        <p class="market-card-value">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
-      </div>
-      <div class="market-card">
-        <p class="market-card-label">Schlusskurs</p>
-        <p class="market-card-value">{daten['prev_close']:,.2f} USD</p>
-      </div>
-    </div>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
+    <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
     {szenarien_html}
 
-    <div class="level-grid">
-      <div class="level-col">
-        <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Widerstände (Intraday)</h3>
-        <div>{level_liste(pivots['r'], '#b5654f')}</div>
-      </div>
-      <div class="level-col">
-        <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Unterstützungen (Intraday)</h3>
-        <div>{level_liste(pivots['s'], '#7fae6f')}</div>
-      </div>
-    </div>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Widerstände (Intraday)</h3>
+    <div>{level_liste(pivots['r'], '#b5654f')}</div>
 
-    <div class="chart-grid">
-      <div class="chart-card">
-        <h3>INTRADAY-CHART (1h)</h3>
-        <img src="cid:chart" alt="Gold Spot Intraday-Chart">
-      </div>
-      <div class="chart-card">
-        <h3>6-MONATS-CHART</h3>
-        <img src="cid:chart_lang" alt="Gold Spot 6-Monats-Chart">
-      </div>
-      <div class="chart-card">
-        <h3>TAGESCHART (1 Jahr)</h3>
-        <img src="cid:chart_tages" alt="Gold Spot Tageschart">
-      </div>
-    </div>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Unterstützungen (Intraday)</h3>
+    <div>{level_liste(pivots['s'], '#7fae6f')}</div>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Realtime Indikation</h3>
+    <p style="font-size:28px;font-family:serif;color:#e8b95c;">{daten['realtime']:,.2f} USD</p>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Schlusskurs (Vortag)</h3>
+    <p style="font-size:20px;font-family:serif;">{daten['prev_close']:,.2f} USD</p>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Rückblick</h3>
     <p style="line-height:1.6;">{rueckblick_text}</p>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Range-Ausbruch-Signal (1h)</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Intraday)</h3>
+    <img src="cid:chart" style="max-width:100%;border:1px solid #3a3226;">
     <p style="line-height:1.6;margin-top:10px;"><strong style="color:#e8b95c;">{range_ausbruch_text.split(chr(10), 1)[0]}</strong><br>{range_ausbruch_text.split(chr(10), 1)[1] if chr(10) in range_ausbruch_text else ''}</p>
     <p style="color:#a89d87;font-size:11px;line-height:1.5;">{RANGE_AUSBRUCH_REGELN_TEXT}</p>
     <p style="color:#a89d87;font-size:10.5px;">
@@ -1667,13 +1622,17 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     {RANGE_AUSBRUCH_BACKTEST_TEXT}
     </p>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Positionstrading-Signal (Tageschart)</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Positionstrading-Basis)</h3>
+    <img src="cid:chart_tages" style="max-width:100%;border:1px solid #3a3226;">
     <p style="line-height:1.6;margin-top:10px;"><strong style="color:#e8b95c;">{positionstrading_text.split(chr(10), 1)[0]}</strong><br>{positionstrading_text.split(chr(10), 1)[1] if chr(10) in positionstrading_text else ''}</p>
     <p style="color:#a89d87;font-size:11px;line-height:1.5;">{POSITIONSTRADING_REGELN_TEXT}</p>
     <p style="color:#a89d87;font-size:10.5px;">
     Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
     {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
     </p>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (6 Monate)</h3>
+    <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
     Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: Twelve Data (XAU/USD)
