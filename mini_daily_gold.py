@@ -1638,7 +1638,7 @@ def berechne_positionstrading_status():
     if in_position and entry_datum < SIGNAL_NEUSTART_DATUM:
         in_position = False
     if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["einstieg_datum"] < SIGNAL_NEUSTART_DATUM:
-    letzter_abgeschlossener_trade = None
+        letzter_abgeschlossener_trade = None
     if in_position:
         # War der EINSTIEG genau die letzte (heutige) Kerze -> heute ausgelöstes
         # Kaufsignal. Sonst: Position läuft bereits, heutiges Signal = Halten.
