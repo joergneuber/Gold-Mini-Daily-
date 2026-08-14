@@ -48,13 +48,13 @@ POSITIONSTRADING_SWING_FENSTER = 10
 POSITIONSTRADING_COOLDOWN_TAGE = 3
 
 # "Neustart" der SIGNAL-ANZEIGE (nicht der Backtest-Kennzahlen!) ab diesem Datum,
-# auf Wunsch des Nutzers (14.08.2026): wir gehen davon aus, dass bis dahin kein
+# auf Wunsch des Nutzers (13.08.2026): wir gehen davon aus, dass bis dahin kein
 # tatsächlicher Auftrag erteilt wurde. Eine Position, die die Simulation schon
 # VOR diesem Datum als eröffnet ansieht, wird für die SIGNAL-Zeile nicht mehr
 # als "aktuell offen" ausgewiesen, und ein abgeschlossener Trade davor nicht
 # mehr als "letzter Trade" gezeigt - auch wenn die Simulation selbst (für
 # korrekte Trend-/Referenzberechnung) weiterhin die volle Historie durchläuft.
-SIGNAL_NEUSTART_DATUM = pd.Timestamp("2026-08-14", tz="UTC")
+SIGNAL_NEUSTART_DATUM = pd.Timestamp("2026-08-13", tz="UTC")
 
 # Volatilitätsfilter (05.08.2026, Sicherheitsnetz für V1e UND Range-Ausbruch):
 # beide bestehenden Signale sind Trendfolge-/Ausbruchssysteme und kaufen in
@@ -1637,9 +1637,8 @@ def berechne_positionstrading_status():
     # ein Trade davor nicht mehr als "letzter Trade".
     if in_position and entry_datum < SIGNAL_NEUSTART_DATUM:
         in_position = False
-    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_datum"] < SIGNAL_NEUSTART_DATUM:
-        letzter_abgeschlossener_trade = None
-
+    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["einstieg_datum"] < SIGNAL_NEUSTART_DATUM:
+    letzter_abgeschlossener_trade = None
     if in_position:
         # War der EINSTIEG genau die letzte (heutige) Kerze -> heute ausgelöstes
         # Kaufsignal. Sonst: Position läuft bereits, heutiges Signal = Halten.
