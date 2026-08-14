@@ -1001,6 +1001,86 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     return pfad
 
 
+def finde_trendkanal_hoeherer_zeitebene(preisreihe, fenster=3, min_punkte=3, flach_schwelle_pct=0.15):
+    """Erkennt Trendkanal/Dreieck ausschließlich für Tages-/6M-Charts.
+
+    Bewusst eigene Funktion: Die bestehende Intraday-Funktion und ihre Parameter
+    bleiben unverändert. Die Schwelle wird über die gesamte dargestellte Periode
+    normalisiert und ist für höhere Zeitebenen robuster als die Intraday-Logik.
+    """
+    hochs, tiefs = finde_swing_punkte(preisreihe, fenster=fenster)
+    if len(hochs) < min_punkte or len(tiefs) < min_punkte:
+        return None
+
+    x_hochs = mdates.date2num([t for t, _ in hochs])
+    y_hochs = np.array([v for _, v in hochs])
+    x_tiefs = mdates.date2num([t for t, _ in tiefs])
+    y_tiefs = np.array([v for _, v in tiefs])
+
+    steigung_oben, achse_oben = np.polyfit(x_hochs, y_hochs, 1)
+    steigung_unten, achse_unten = np.polyfit(x_tiefs, y_tiefs, 1)
+
+    referenz_preis = float(preisreihe.iloc[-1])
+    tage_gesamt = (preisreihe.index[-1] - preisreihe.index[0]).total_seconds() / 86400
+    if tage_gesamt <= 0 or referenz_preis <= 0:
+        return None
+
+    delta_oben_pct = (steigung_oben * tage_gesamt) / referenz_preis * 100
+    delta_unten_pct = (steigung_unten * tage_gesamt) / referenz_preis * 100
+
+    oben_flach = abs(delta_oben_pct) < flach_schwelle_pct
+    unten_flach = abs(delta_unten_pct) < flach_schwelle_pct
+    oben_steigt = delta_oben_pct >= flach_schwelle_pct
+    unten_steigt = delta_unten_pct >= flach_schwelle_pct
+    oben_faellt = delta_oben_pct <= -flach_schwelle_pct
+    unten_faellt = delta_unten_pct <= -flach_schwelle_pct
+
+    if oben_flach and unten_steigt:
+        formation = "Aufsteigendes Dreieck"
+    elif unten_flach and oben_faellt:
+        formation = "Absteigendes Dreieck"
+    elif oben_flach and unten_flach:
+        formation = "Seitwärtsrange"
+    elif oben_faellt and unten_steigt:
+        formation = "Symmetrisches Dreieck"
+    elif oben_steigt and unten_steigt:
+        formation = "Aufwärtskanal"
+    elif oben_faellt and unten_faellt:
+        formation = "Abwärtskanal"
+    elif oben_steigt and unten_faellt:
+        formation = "Erweiternde Formation (Keil)"
+    else:
+        formation = "Keine eindeutige Formation"
+
+    return {
+        "obere_linie": (steigung_oben, achse_oben),
+        "untere_linie": (steigung_unten, achse_unten),
+        "formation": formation,
+        "anzahl_hochs": len(hochs),
+        "anzahl_tiefs": len(tiefs),
+    }
+
+
+def zeichne_hoeheren_trendkanal(ax, preisreihe, kanal, label_x=None, label_y=None):
+    """Zeichnet einen bereits erkannten Kanal; nur für Tages-/6M-Charts."""
+    if kanal is None:
+        return
+    x_rand = preisreihe.index[[0, -1]]
+    x_num_rand = mdates.date2num(x_rand)
+    steigung_oben, achse_oben = kanal["obere_linie"]
+    steigung_unten, achse_unten = kanal["untere_linie"]
+    y_oben = steigung_oben * x_num_rand + achse_oben
+    y_unten = steigung_unten * x_num_rand + achse_unten
+
+    ax.plot(x_rand, y_oben, color="#d9534f", linewidth=1.6, alpha=0.85, zorder=5)
+    ax.plot(x_rand, y_unten, color="#5cb85c", linewidth=1.6, alpha=0.85, zorder=5)
+
+    x_text = label_x if label_x is not None else preisreihe.index[-1]
+    y_text = label_y if label_y is not None else max(y_oben[-1], y_unten[-1])
+    ax.text(x_text, y_text, f"  {kanal['formation']}", color="#e8b95c",
+            fontsize=9.5, fontweight="bold", va="bottom", ha="left")
+
+
 def baue_tageschart(daily, status, pfad="chart_tages.png"):
     """Tageschart (ca. 12 Monate) auf genau der Datenbasis, auf der das
     Positionstrading-Signal beruht: 50-Tage-Trend, 10-Tage-Swing-Tief-Referenz,
@@ -1013,6 +1093,34 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
 
     schluss = daily["Close"]
     ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
+
+    # Zusätzliche Struktur-Logik für den Tageschart.
+    # Diese Parameter gelten NUR hier und verändern die Intraday-Logik nicht.
+    kanal = finde_trendkanal_hoeherer_zeitebene(daily["Close"], fenster=4, min_punkte=3, flach_schwelle_pct=0.15)
+    if kanal is not None:
+        zeichne_hoeheren_trendkanal(ax, daily["Close"], kanal)
+
+    # Mehrfach bestätigte Tages-Support-/Resistance-Zonen als strukturelle Linien.
+    tages_zonen = analysiere_reaktionszonen(daily, fenster=3, bucket_usd=20, min_treffer=2, top_n=3)
+    for preis, treffer in tages_zonen.get("widerstandszonen", []):
+        ax.axhline(preis, color="#b5654f", linewidth=0.9, linestyle="--", alpha=0.65, zorder=2)
+        ax.text(daily.index[-1], preis, f" Widerstand {preis:,.0f} ({treffer}x)".replace(",", "."),
+                color="#e8887a", fontsize=8, fontweight="bold", va="center", ha="left")
+    for preis, treffer in tages_zonen.get("supportzonen", []):
+        ax.axhline(preis, color="#7fae6f", linewidth=0.9, linestyle="--", alpha=0.65, zorder=2)
+        ax.text(daily.index[-1], preis, f" Support {preis:,.0f} ({treffer}x)".replace(",", "."),
+                color="#9fcf8f", fontsize=8, fontweight="bold", va="center", ha="left")
+
+    # Sichtbare Konsolidierungs-/Range-Struktur über den jüngeren Tagesdaten.
+    range_boxen = finde_range_boxen(daily, fenster=4, bucket_usd=25, min_treffer=2, segmente=3)
+    for start_zeit, end_zeit, tief, hoch in range_boxen:
+        x_start = mdates.date2num(start_zeit)
+        x_end = mdates.date2num(end_zeit)
+        ax.add_patch(Rectangle((x_start, tief), x_end - x_start, hoch - tief,
+                               linewidth=1.2, edgecolor="#e8e0c8", facecolor="none",
+                               alpha=0.65, zorder=3))
+        ax.text(end_zeit, hoch, " Range", color="#e8e0c8", fontsize=7.5,
+                style="italic", va="bottom", ha="left")
 
     # 50-Tage-Trend (gleiche Methode wie im Positionstrading-Signal) über den
     # letzten verfügbaren Ausschnitt dieses Charts eingezeichnet.
@@ -1063,8 +1171,7 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
 
 
 def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
-    """4-Monats-Tageschart mit den bereits berechneten Reaktionszonen als Linien -
-    macht sichtbar, wo die im Rückblick-Text genannten strukturellen Zonen herkommen."""
+    """6-Monats-Tageschart mit übergeordneter Struktur, Formation, Ranges und Zonen."""
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
     ax.set_facecolor("#14110d")
@@ -1072,23 +1179,24 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     schluss = daily["Close"]
     ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
 
-    # Trendlinie über den gesamten dargestellten Zeitraum (anders als beim Intraday-Chart,
-    # wo nur die jüngere Hälfte genutzt wird - hier soll die übergeordnete 4-Monats-Bewegung
-    # abgebildet werden, nicht nur ein kurzer Ausschnitt)
-    x_num = mdates.date2num(schluss.index)
-    steigung, achsenabschnitt = np.polyfit(x_num, schluss.values, 1)
-    trend_werte = steigung * x_num + achsenabschnitt
-    trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
-    trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
-    ax.plot(schluss.index, trend_werte, color=trend_farbe, linewidth=1.8,
-             linestyle="-", alpha=0.9, zorder=5)
-    ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
-             fontsize=10, fontweight="bold", va="bottom", ha="left")
+    # Übergeordnete Trend-/Formationslogik ausschließlich für den 6M-Chart.
+    kanal = finde_trendkanal_hoeherer_zeitebene(daily["Close"], fenster=6, min_punkte=3, flach_schwelle_pct=0.10)
+    if kanal is not None:
+        zeichne_hoeheren_trendkanal(ax, daily["Close"], kanal)
+    else:
+        # Robuster Fallback, falls die höhere Zeitebene nicht genug Swing-Punkte liefert.
+        x_num = mdates.date2num(schluss.index)
+        steigung, achsenabschnitt = np.polyfit(x_num, schluss.values, 1)
+        trend_werte = steigung * x_num + achsenabschnitt
+        trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
+        trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
+        ax.plot(schluss.index, trend_werte, color=trend_farbe, linewidth=1.8, alpha=0.9, zorder=5)
+        ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
+                fontsize=10, fontweight="bold", va="bottom", ha="left")
 
-    # Range-Boxen: gleiche Berührungs-basierte Erkennung wie im Intraday-Chart, aber
-    # in 3 zeitliche Abschnitte segmentiert - über 4 Monate kann es mehrere getrennte
-    # Ranges auf unterschiedlichen Kursniveaus geben, nicht nur eine einzige.
-    range_boxen = finde_range_boxen(daily, fenster=5, bucket_usd=30, min_treffer=2, segmente=3)
+    # Range-Boxen: höhere Zeitebene, bewusst mit eigenen Parametern.
+    # Über 6 Monate können mehrere getrennte Konsolidierungsphasen auftreten.
+    range_boxen = finde_range_boxen(daily, fenster=6, bucket_usd=35, min_treffer=2, segmente=3)
     for start_zeit, end_zeit, tief, hoch in range_boxen:
         x_start = mdates.date2num(start_zeit)
         x_end = mdates.date2num(end_zeit)
@@ -1098,6 +1206,19 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
         ))
         ax.text(end_zeit, hoch, " Range", color="#e8e0c8", fontsize=8.5,
                  style="italic", va="bottom", ha="left")
+
+    # Zusätzliche 6M-Zonen direkt aus dem sichtbaren 6M-Zeitraum.
+    # Die bestehenden Report-Zonen bleiben unverändert.
+    sechs_m_zonen = analysiere_reaktionszonen(daily, fenster=5, bucket_usd=30, min_treffer=2, top_n=4)
+    if sechs_m_zonen:
+        for preis, treffer in sechs_m_zonen.get("widerstandszonen", []):
+            ax.axhline(preis, color="#b5654f", linewidth=0.9, linestyle="--", alpha=0.60, zorder=2)
+            ax.text(daily.index[-1], preis, f" Struktur-Widerstand {preis:,.0f} ({treffer}x)".replace(",", "."),
+                    color="#e8887a", fontsize=7.5, fontweight="bold", va="center", ha="left")
+        for preis, treffer in sechs_m_zonen.get("supportzonen", []):
+            ax.axhline(preis, color="#7fae6f", linewidth=0.9, linestyle="--", alpha=0.60, zorder=2)
+            ax.text(daily.index[-1], preis, f" Struktur-Support {preis:,.0f} ({treffer}x)".replace(",", "."),
+                    color="#9fcf8f", fontsize=7.5, fontweight="bold", va="center", ha="left")
 
     if zonen:
         for preis, treffer, fenster in zonen["widerstandszonen"]:
@@ -1117,7 +1238,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
     ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
-    ax.set_title("Gold Spot (XAU/USD) - 4 Monate, strukturelle Reaktionszonen", color="#ece6d9",
+    ax.set_title("Gold Spot (XAU/USD) - 6 Monate, strukturelle Chartstruktur", color="#ece6d9",
                  fontsize=13, loc="left")
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
@@ -1510,7 +1631,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
     </p>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (4 Monate)</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (6 Monate)</h3>
     <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
@@ -1933,10 +2054,11 @@ def main():
     tendenz_label, tendenz_pct = bestimme_tendenz(daten["realtime"], daten["prev_close"])
 
     zonen_je_zeitraum = {}
+    # 6M-Datenbasis für den übergeordneten Strukturchart.
     daily_lang = None
-    for monate in (3, 4, 36):
+    for monate in (3, 4, 6, 36):
         langfrist = hole_langfrist_daten(monate=monate)
-        if monate == 4:
+        if monate == 6:
             daily_lang = langfrist
         zonen_je_zeitraum[monate] = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
         if zonen_je_zeitraum[monate]:
@@ -1951,13 +2073,11 @@ def main():
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
-    # Für den 4-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/4-Monats-
-    # Fenstern (nicht 36M) - deren Zonen stammen aus Daten, die ohnehin im sichtbaren
-    # 4-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
-    # Fenster bleibt außen vor, weil es auch Zonen aus einem ganz anderen (viel tieferen)
-    # historischen Kursniveau liefern kann.
+    # Für den 6-Monats-Chart werden nur die 3-/4-/6-Monats-Fenster zusammengeführt.
+    # Das 36-Monats-Fenster bleibt aus der Chartdarstellung heraus, damit historische
+    # Extremniveaus die sichtbare Struktur nicht überladen.
     kombinierte_zonen_lang = kombiniere_zonen(
-        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 4)}
+        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 4, 6)}
     )
 
     range_ausbruch_status = berechne_range_ausbruch_status()
