@@ -1546,18 +1546,10 @@ def berechne_positionstrading_status():
     # Neustart-Regel (siehe SIGNAL_NEUSTART_DATUM oben): eine schon vor dem
     # Stichtag eröffnete Position gilt für die Anzeige nicht mehr als offen,
     # ein Trade davor nicht mehr als "letzter Trade".
-    alter_live_zustand = False
     if in_position and entry_datum < SIGNAL_NEUSTART_DATUM:
         in_position = False
-        alter_live_zustand = True
-    if (
-        letzter_abgeschlossener_trade
-        and letzter_abgeschlossener_trade["einstieg_datum"] < SIGNAL_NEUSTART_DATUM
-    ):
+    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_datum"] < SIGNAL_NEUSTART_DATUM:
         letzter_abgeschlossener_trade = None
-        alter_live_zustand = True
-    if alter_live_zustand:
-        cooldown_bis = None
 
     if in_position:
         # War der EINSTIEG genau die letzte (heutige) Kerze -> heute ausgelöstes
@@ -1782,18 +1774,10 @@ def berechne_range_ausbruch_status():
     # Neustart-Regel (siehe SIGNAL_NEUSTART_DATUM oben): eine schon vor dem
     # Stichtag eröffnete Position gilt für die Anzeige nicht mehr als offen,
     # ein Trade davor nicht mehr als "letzter Trade".
-    alter_live_zustand = False
     if in_position and entry_zeit < SIGNAL_NEUSTART_DATUM:
         in_position = False
-        alter_live_zustand = True
-    if (
-        letzter_abgeschlossener_trade
-        and letzter_abgeschlossener_trade["einstieg_zeit"] < SIGNAL_NEUSTART_DATUM
-    ):
+    if letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_zeit"] < SIGNAL_NEUSTART_DATUM:
         letzter_abgeschlossener_trade = None
-        alter_live_zustand = True
-    if alter_live_zustand:
-        cooldown_bis = None
 
     if in_position:
         heutiges_signal = "KAUF" if entry_zeit == letzte_zeit else "HALTEN"
