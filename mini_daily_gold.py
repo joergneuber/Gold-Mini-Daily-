@@ -14,9 +14,9 @@ genutzt) nur Tages-OHLC liefert, kein Intraday-Intervall.
 """
 
 import os
+import json
 import sys
 import time
-import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import matplotlib
@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import requests
 from google import genai
+from economic_events import briefing_block
 
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
@@ -70,6 +71,12 @@ VOLATILITAETS_FENSTER_KURZ_TAGE = 14
 VOLATILITAETS_FENSTER_LANG_TAGE = 100
 VOLATILITAETS_FENSTER_KURZ_STUNDEN = 14
 VOLATILITAETS_FENSTER_LANG_STUNDEN = 200
+
+# Trade-Alert-Vorwarnung: rein für die Mail-Logik, verändert keine
+# Signalberechnung und keine Entry-/Exit-Regel. Eine PREPARE-Mail wird nur
+# gesendet, wenn der aktuelle Schlusskurs höchstens 0,5 % vom jeweiligen
+# bestätigten Entry-Trigger entfernt ist und noch keine Position offen ist.
+TRADE_ALERT_PREPARE_ABSTAND_PCT = 0.5
 
 
 def berechne_atr(daten, fenster):
@@ -167,9 +174,8 @@ POSITIONSTRADING_REGELN_TEXT = (
 ) + volatilitaets_filter_text(VOLATILITAETS_FENSTER_KURZ_TAGE, VOLATILITAETS_FENSTER_LANG_TAGE)
 
 # Range-Ausbruch-Signal (Backtest 05.08.2026 auf XAU/USD 1h, Twelve Data:
-# Die alten Backtest-Kennzahlen gelten nach Einführung des 0,60%-Risikolimits
-# nicht mehr und müssen mit dem aktualisierten Backtest neu ermittelt werden.
-# Anders als beim V1e-Signal NICHT bei
+# 144 Trades 24.01.2020-05.08.2026, Trefferquote 32,6%, Summe +110,82%,
+# siehe backtest_range_ausbruch.py). Anders als beim V1e-Signal NICHT bei
 # jedem Lauf über die volle Historie neu simuliert - das würde bei
 # Stundenkerzen wegen des Twelve-Data-Rate-Limits (8 Credits/Minute) viele
 # Chunk-Anfragen und mehrere Minuten pro Lauf kosten, 6x täglich unnötig.
@@ -182,36 +188,16 @@ POSITIONSTRADING_REGELN_TEXT = (
 RANGE_AUSBRUCH_FENSTER = 24  # Stunden-Kerzen für die Range-Hoch/-Tief-Referenz
 RANGE_AUSBRUCH_COOLDOWN_STUNDEN = 12
 RANGE_AUSBRUCH_HISTORIE_TAGE = 200
-# Sicherheitsfilter für den Range-Ausbruch: Das technische 24h-Tief bleibt
-# der Stop. Liegt dieser Stop weiter als 0,60 % vom bestätigten Einstieg
-# entfernt, wird KEIN Trade eröffnet. Wir verschieben den Stop also nicht
-# künstlich nach oben, sondern lehnen ein zu riskantes Setup ab.
-RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT = 0.60
-# Vorbereitungs-Alert: bewusst nur ein Vorlauf, noch KEIN Kaufsignal.
-# 1h: aktueller Schlusskurs muss innerhalb dieses Abstands unter dem 24h-Trigger liegen.
-RANGE_AUSBRUCH_VORBEREITUNG_ABSTAND_PCT = 0.20
-# Tageschart: aktueller Kurs muss innerhalb dieses Abstands über dem 10-Tage-Swing-Tief liegen
-# und der Aufwärtstrend muss bereits erfüllt sein.
-POSITIONSTRADING_VORBEREITUNG_ABSTAND_PCT = 1.00
 RANGE_AUSBRUCH_BACKTEST_TEXT = (
-    "Backtest (2020-01-24 bis 2026-08-10, 35 Trades) mit 0,60%-Risikolimit und "
-    "charttechnischer C1-Zielsetzung: +19,11% Summe, 25,7% Trefferquote, "
-    "Ø Trade +0,55%. C1 wurde gegen 2R/3R sowie C2/C3 getestet und war im "
-    "bisherigen Test die beste Variante."
+    "144 Trades 24.01.2020-05.08.2026, Trefferquote 32,6%, Summe +110,82% "
+    "(Backtest-Snapshot vom 05.08.2026, XAU/USD 1h - nicht laufend neu berechnet)."
 )
 RANGE_AUSBRUCH_REGELN_TEXT = (
     "Regeln: Nur Long. Schlusskurs bricht über das rollierende 24h-Hoch aus "
     "(bestätigter Close, kein reiner Docht) -> KAUF. Stop = 24h-Tief zum "
-    "Einstiegszeitpunkt. Liegt der Stop-Abstand über "
-    f"{RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT:.2f}%, wird der Trade abgelehnt "
-    "(Stop wird NICHT künstlich verschoben). TP1 = erster bereits bestätigter "
-    "1h-Swing-Widerstand mindestens 1R oberhalb des Einstiegs; TP2 = erster "
-    "bereits bestätigter 1h-Swing-Widerstand mindestens 3R oberhalb des Einstiegs. "
-    "Falls kein passender Widerstand vorhanden ist, Fallback auf 2R (TP1) bzw. 3R (TP2). "
-    "TP1 erreicht -> Stop auf Breakeven, TP2 erreicht -> Stop auf TP1, danach "
-    "kontinuierlich am 24h-Tief nachgezogen. Stop erreicht -> VERKAUF, danach "
-    "12 Stunden Cooldown. Die Swing-Highs müssen mit 2 Kerzen links und 2 Kerzen "
-    "rechts bestätigt sein; es wird kein zukünftiges Wissen verwendet."
+    "Einstiegszeitpunkt. TP1/TP2 = 2R/3R: TP1 erreicht -> Stop auf Breakeven, "
+    "TP2 erreicht -> Stop auf TP1, danach kontinuierlich am 24h-Tief "
+    "nachgezogen. Stop erreicht -> VERKAUF, danach 12 Stunden Cooldown."
 ) + volatilitaets_filter_text(VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
 
 
@@ -252,19 +238,7 @@ def hole_zeitreihe(interval, outputsize=None, start_date=None, end_date=None, ma
         if end_date:
             params["end_date"] = end_date
 
-        try:
-            antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=60)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-            wartezeit = min(10 * versuch, 30)
-            print(f"  Netzwerk-/Timeout bei Twelve Data ({interval}, Versuch {versuch}/{max_versuche}): {exc}")
-            if versuch < max_versuche:
-                print(f"  Warte {wartezeit}s und versuche erneut...")
-                time.sleep(wartezeit)
-                continue
-            raise RuntimeError(
-                f"Twelve Data nicht erreichbar nach {max_versuche} Versuchen ({interval})."
-            ) from exc
-
+        antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=20)
         if antwort.status_code == 429:
             wartezeit = 65
             print(f"  Rate-Limit bei Twelve-Data-Anfrage ({interval}, Versuch {versuch}/{max_versuche}) - "
@@ -694,7 +668,7 @@ def finde_range_boxen(preisreihe, fenster=5, bucket_usd=30, min_treffer=2, segme
     return boxen
 
 
-def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_treffer=2, top_n=3):
+def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=15, min_treffer=2, top_n=3):
     """Analog zu analysiere_reaktionszonen (die für Tagesdaten schon existiert), aber
     auf Intraday-Kerzen angewendet: findet Swing-Hochs/-Tiefs und gruppiert sie zu
     Umkehrzonen mit mehreren Berührungen. Anders als finde_range_box werden hier
@@ -726,6 +700,83 @@ def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=5, min_tref
     return {"widerstandszonen": clustern(swing_highs), "supportzonen": clustern(swing_lows)}
 
 
+def finde_swing_punkte(reihe, fenster=3):
+    """Findet lokale Hochs/Tiefs (Swing-Punkte): ein Punkt gilt als Swing-Hoch,
+    wenn er innerhalb von `fenster` Perioden vor UND nach ihm das Maximum ist
+    (analog Swing-Tief mit Minimum). Gibt zwei Listen von (Zeitpunkt, Wert)
+    zurück, chronologisch sortiert."""
+    werte = reihe.to_numpy()
+    zeiten = reihe.index
+    hochs, tiefs = [], []
+    for i in range(fenster, len(werte) - fenster):
+        ausschnitt = werte[i - fenster:i + fenster + 1]
+        if werte[i] == ausschnitt.max() and werte[i] > werte[i - fenster] and werte[i] > werte[i + fenster]:
+            hochs.append((zeiten[i], float(werte[i])))
+        if werte[i] == ausschnitt.min() and werte[i] < werte[i - fenster] and werte[i] < werte[i + fenster]:
+            tiefs.append((zeiten[i], float(werte[i])))
+    return hochs, tiefs
+
+
+def finde_trendkanal(intraday_reihe, fenster=3, min_punkte=2, flach_schwelle_pct=0.3):
+    """Sucht eine Kanal- oder Dreiecksformation: fittet je eine Linie durch die
+    Swing-Hochs (Widerstandsseite) und die Swing-Tiefs (Supportseite) und
+    klassifiziert die Formation anhand der beiden Steigungen (auf Prozent des
+    aktuellen Kurses normiert, damit die Schwellen unabhängig vom Kursniveau
+    funktionieren). Gibt None zurück, wenn nicht auf JEDER Seite mindestens
+    min_punkte Swing-Punkte gefunden wurden - dann greift im Chart der
+    Fallback auf die einfache Einzel-Trendlinie."""
+    hochs, tiefs = finde_swing_punkte(intraday_reihe["Close"], fenster)
+    if len(hochs) < min_punkte or len(tiefs) < min_punkte:
+        return None
+
+    x_hochs = mdates.date2num([t for t, _ in hochs])
+    y_hochs = np.array([v for _, v in hochs])
+    x_tiefs = mdates.date2num([t for t, _ in tiefs])
+    y_tiefs = np.array([v for _, v in tiefs])
+
+    steigung_oben, achse_oben = np.polyfit(x_hochs, y_hochs, 1)
+    steigung_unten, achse_unten = np.polyfit(x_tiefs, y_tiefs, 1)
+
+    referenz_preis = float(intraday_reihe["Close"].iloc[-1])
+    tage_gesamt = (intraday_reihe.index[-1] - intraday_reihe.index[0]).total_seconds() / 86400
+    if tage_gesamt <= 0 or referenz_preis <= 0:
+        return None
+    delta_oben_pct = (steigung_oben * tage_gesamt) / referenz_preis * 100
+    delta_unten_pct = (steigung_unten * tage_gesamt) / referenz_preis * 100
+
+    oben_flach = abs(delta_oben_pct) < flach_schwelle_pct
+    unten_flach = abs(delta_unten_pct) < flach_schwelle_pct
+    oben_steigt = delta_oben_pct >= flach_schwelle_pct
+    unten_steigt = delta_unten_pct >= flach_schwelle_pct
+    oben_faellt = delta_oben_pct <= -flach_schwelle_pct
+    unten_faellt = delta_unten_pct <= -flach_schwelle_pct
+
+    if oben_flach and unten_steigt:
+        formation = "Aufsteigendes Dreieck"
+    elif unten_flach and oben_faellt:
+        formation = "Absteigendes Dreieck"
+    elif oben_flach and unten_flach:
+        formation = "Seitwärtsrange"
+    elif oben_faellt and unten_steigt:
+        formation = "Symmetrisches Dreieck"
+    elif oben_steigt and unten_steigt:
+        formation = "Aufwärtskanal"
+    elif oben_faellt and unten_faellt:
+        formation = "Abwärtskanal"
+    elif oben_steigt and unten_faellt:
+        formation = "Erweiternde Formation (Keil)"
+    else:
+        formation = "Keine eindeutige Formation"
+
+    return {
+        "obere_linie": (steigung_oben, achse_oben),
+        "untere_linie": (steigung_unten, achse_unten),
+        "formation": formation,
+        "anzahl_hochs": len(hochs),
+        "anzahl_tiefs": len(tiefs),
+    }
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -734,18 +785,39 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     preise = intraday_reihe["Close"]
     ax.plot(intraday_reihe.index, preise, color="#e8b95c", linewidth=1.6)
 
-    # Trendlinie: einfache lineare Regression über die letzte Hälfte der Kursreihe
-    # (aktuellerer Trend statt über den gesamten 2-Tage-Zeitraum gemittelt)
-    trend_ausschnitt = preise.iloc[len(preise) // 2:]
-    x_num = mdates.date2num(trend_ausschnitt.index)
-    steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
-    trend_werte = steigung * x_num + achsenabschnitt
-    trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
-    trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
-    ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8,
-             linestyle="-", alpha=0.9, zorder=5)
-    ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
-             fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
+    # Trendkanal: zwei Linien durch Swing-Hochs/-Tiefs, klassifiziert als Kanal-
+    # oder Dreieck-Formation (siehe finde_trendkanal). Nur wenn genug Swing-
+    # Punkte für beide Linien gefunden wurden - sonst Fallback auf die
+    # einfache Einzel-Trendlinie (lineare Regression über die letzte Hälfte).
+    kanal = finde_trendkanal(intraday_reihe)
+    kanal_werte_fuer_achse = []
+    if kanal is not None:
+        x_num_rand = mdates.date2num([intraday_reihe.index[0], intraday_reihe.index[-1]])
+        steigung_oben, achse_oben = kanal["obere_linie"]
+        steigung_unten, achse_unten = kanal["untere_linie"]
+        y_oben_linie = steigung_oben * x_num_rand + achse_oben
+        y_unten_linie = steigung_unten * x_num_rand + achse_unten
+        kanal_werte_fuer_achse = list(y_oben_linie) + list(y_unten_linie)
+
+        ax.plot(intraday_reihe.index[[0, -1]], y_oben_linie, color="#d9534f", linewidth=1.6,
+                 linestyle="-", alpha=0.85, zorder=5)
+        ax.plot(intraday_reihe.index[[0, -1]], y_unten_linie, color="#5cb85c", linewidth=1.6,
+                 linestyle="-", alpha=0.85, zorder=5)
+        ax.text(intraday_reihe.index[-1], max(y_oben_linie[-1], y_unten_linie[-1]), f"  {kanal['formation']}",
+                 color="#e8b95c", fontsize=10, fontweight="bold", va="bottom", ha="left")
+    else:
+        # Trendlinie: einfache lineare Regression über die letzte Hälfte der Kursreihe
+        # (aktuellerer Trend statt über den gesamten 2-Tage-Zeitraum gemittelt)
+        trend_ausschnitt = preise.iloc[len(preise) // 2:]
+        x_num = mdates.date2num(trend_ausschnitt.index)
+        steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
+        trend_werte = steigung * x_num + achsenabschnitt
+        trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
+        trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
+        ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8,
+                 linestyle="-", alpha=0.9, zorder=5)
+        ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
+                 fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
 
     # Umkehrzonen vorab berechnen (wird weiter unten auch fürs Zeichnen genutzt), damit
     # die Range-Box nur gezeigt wird, wenn sie sich mit einer Umkehrzone deckt - sonst
@@ -779,6 +851,13 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     puffer = (preise.max() - preise.min()) * 0.15
     y_unten = preise.min() - puffer
     y_oben = preise.max() + puffer
+
+    # Trendkanal-Linien können am rechten/linken Rand leicht über die reine
+    # Kursspanne hinaus extrapolieren (Geradengleichung über den vollen
+    # Zeitraum) - Achse bei Bedarf mitziehen, damit nichts abgeschnitten wird.
+    for wert in kanal_werte_fuer_achse:
+        y_oben = max(y_oben, wert + puffer * 0.2)
+        y_unten = min(y_unten, wert - puffer * 0.2)
 
     # Range-Ausbruch-Signal (1h): falls aktuell offen, zieht Einstieg/Stop/TP1/TP2
     # die Achse mit auf, genau wie die Pivot-/Struktur-Level weiter unten - diese
@@ -852,25 +931,35 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
              fontsize=8.5, va="top", ha="left")
 
-    # Umkehrzonen zeichnen: mehrfach berührte Swing-Hochs/-Tiefs, jede einzeln als Linie -
-    # nur innerhalb des bereits feststehenden Achsenbereichs, damit sie die Skala nicht
-    # erneut aufblähen. Eigene Farbe (Blau) statt Creme, unterscheidbar von der Range-Box.
-    # Zonen INNERHALB einer bereits gezeichneten Range-Box werden übersprungen - die
-    # Box deckt diesen Preisbereich schon ab, eine zusätzliche Linie wäre redundant
-    # und sorgt nur für überlappende Beschriftungen.
+    # Umkehrzonen zeichnen: sichtbares 15-USD-Band mit klarer Mittellinie.
+    # Die Umkehrzonen-Erkennung selbst bleibt unverändert. Der bestätigte
+    # mittlere Preis ist die Mittellinie; das Band liegt exakt +/- 7,5 USD darum.
     def in_box(p):
         return box_bereich is not None and box_bereich[0] <= p <= box_bereich[1]
 
+    BUCKET_UMKEHR_USD = 15.0
+    HALBES_BUCKET = BUCKET_UMKEHR_USD / 2.0
+
+    def zeichne_umkehrzone(preis, treffer):
+        zone_unten = preis - HALBES_BUCKET
+        zone_oben = preis + HALBES_BUCKET
+        ax.axhspan(zone_unten, zone_oben, color="#6fa8dc", alpha=0.18, zorder=2)
+        # Begrenzung des 15-USD-Buckets
+        ax.axhline(zone_unten, color="#6fa8dc", linewidth=0.8, linestyle="-", alpha=0.45, zorder=5)
+        ax.axhline(zone_oben, color="#6fa8dc", linewidth=0.8, linestyle="-", alpha=0.45, zorder=5)
+        # Klare Mittellinie innerhalb des 15-USD-Buckets
+        ax.axhline(preis, color="#6fa8dc", linewidth=1.8, linestyle="-", alpha=1.0, zorder=7)
+        ax.text(intraday_reihe.index[-1], preis,
+                f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=7)
+
     for preis, treffer in umkehrzonen["widerstandszonen"]:
         if y_unten <= preis <= y_oben and not in_box(preis):
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
-            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
+            zeichne_umkehrzone(preis, treffer)
+
     for preis, treffer in umkehrzonen["supportzonen"]:
         if y_unten <= preis <= y_oben and not in_box(preis):
-            ax.axhline(preis, color="#6fa8dc", linewidth=1.0, linestyle="-", alpha=0.6)
-            ax.text(intraday_reihe.index[-1], preis, f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                     color="#6fa8dc", fontsize=7.5, va="bottom", ha="right")
+            zeichne_umkehrzone(preis, treffer)
 
     ax.set_ylim(y_unten, y_oben)
     ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
@@ -1114,12 +1203,6 @@ def formatiere_vorschau(status, fmt):
         f"Vorschau (kein aktives Signal): Einstieg {einstieg_label}, Stop {fmt(vorschau['stop'])} USD, "
         f"TP1 {fmt(vorschau['tp1'])} USD (CRV {crv1:.1f}), TP2 {fmt(vorschau['tp2'])} USD (CRV {crv2:.1f})"
     )
-    if "risiko_pct" in vorschau:
-        status_text = "zulässig" if vorschau.get("trade_zulaessig") else "ABGELEHNT"
-        zeile += (
-            f". Stop-Abstand {vorschau['risiko_pct']:.2f}% -> Range-Risikolimit "
-            f"{RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT:.2f}%: {status_text}"
-        )
     if vorschau.get("trend_erfuellt") is False:
         zeile += ". Trendbedingung aktuell NICHT erfüllt - Vorschau daher rein illustrativ, kein gültiges Setup."
         tage = vorschau.get("tage_bis_trendwechsel")
@@ -1251,7 +1334,7 @@ def formatiere_range_ausbruch(status):
 
 
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status):
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -1282,6 +1365,9 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
 MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
+WICHTIGE US-MARKT-EVENTS
+{economic_events_block}
+
 VORBOERSLICHE TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
@@ -1321,7 +1407,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -1339,6 +1425,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     positionstrading_text = formatiere_positionstrading(positionstrading_status)
     range_ausbruch_text = formatiere_range_ausbruch(range_ausbruch_status)
+    economic_events_html = economic_events_block.replace("\n", "<br>")
 
     def fmt(n):
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -1379,6 +1466,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <h1 style="color:#e8b95c;font-family:serif;margin-top:0;">Mini Daily: Gold</h1>
     <p style="color:#a89d87;">{heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr</p>
     {warnblock}
+    <div style="background:#2a1d14;border-left:3px solid #d9a441;padding:10px 14px;color:#e8c98a;font-size:12.5px;line-height:1.5;margin:10px 0 16px 0;">
+    {economic_events_html}
+    </div>
     <hr style="border-color:#3a3226;">
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
@@ -1467,11 +1557,10 @@ def berechne_positionstrading_status():
     entry_datum = None
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
+    letztes_alert_event = None
     alle_trades = []  # sammelt jeden abgeschlossenen Trade für die Live-Backtest-Kennzahlen im Footer
-    aktuelles_event = None
 
     for datum, bar in daily.iterrows():
-        aktuelles_event = None
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
         trend_auf = aufwaertstrend.get(datum)
         ref_tief = swing_tief_referenz.get(datum)
@@ -1492,9 +1581,9 @@ def berechne_positionstrading_status():
                         in_position = True
                         stufe = 0
                         entry_datum = datum
-                        aktuelles_event = {
-                            "event": "ENTRY", "zeit": datum, "einstieg": entry,
-                            "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
+                        letztes_alert_event = {
+                            "event": "ENTRY", "zeit": datum.isoformat(),
+                            "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
                         }
         else:
             if stufe == 2 and pd.notna(ref_tief):
@@ -1505,25 +1594,25 @@ def berechne_positionstrading_status():
                     "ergebnis_pct": (stop - entry) / entry * 100,
                 }
                 alle_trades.append(letzter_abgeschlossener_trade["ergebnis_pct"])
+                letztes_alert_event = {
+                    "event": "STOP", "zeit": datum.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
                 in_position = False
                 cooldown_bis = datum + pd.Timedelta(days=POSITIONSTRADING_COOLDOWN_TAGE)
-                aktuelles_event = {
-                    "event": "STOP", "zeit": datum, "einstieg": entry,
-                    "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
-                }
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
-                aktuelles_event = {
-                    "event": "TP2", "zeit": datum, "einstieg": entry,
-                    "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
+                letztes_alert_event = {
+                    "event": "TP2", "zeit": datum.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
                 }
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
-                aktuelles_event = {
-                    "event": "TP1", "zeit": datum, "einstieg": entry,
-                    "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
+                letztes_alert_event = {
+                    "event": "TP1", "zeit": datum.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
                 }
 
     def backtest_kennzahlen_text():
@@ -1564,7 +1653,7 @@ def berechne_positionstrading_status():
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_tage": (letztes_datum - entry_datum).days,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
-            "event": aktuelles_event if aktuelles_event and aktuelles_event["zeit"] == letztes_datum else None,
+            "_alert_event": (letztes_alert_event if letztes_alert_event and letztes_alert_event["zeit"] == letztes_datum.isoformat() else None),
         }
     else:
         # War der AUSSTIEG (Stop) genau die letzte (heutige) Kerze -> heute
@@ -1613,74 +1702,42 @@ def berechne_positionstrading_status():
                         daily["Close"].to_numpy(), POSITIONSTRADING_TREND_FENSTER, letzter_kurs
                     )
 
+        alert_event = None
+        if (
+            heutiges_signal == "KEIN_SIGNAL"
+            and not (cooldown_bis is not None and letztes_datum < cooldown_bis)
+            and vorschau is not None
+            and vorschau.get("trend_erfuellt") is True
+        ):
+            trigger = float(vorschau["stop"])
+            aktueller = float(letzter_kurs)
+            abstand_pct = abs(aktueller - trigger) / trigger * 100 if trigger else 999.0
+            if aktueller >= trigger and abstand_pct <= TRADE_ALERT_PREPARE_ABSTAND_PCT:
+                alert_event = {
+                    "event": "PREPARE",
+                    "zeit": letztes_datum.isoformat(),
+                    "einstieg": float(vorschau["hypothetischer_einstieg"]),
+                    "stop": float(vorschau["stop"]),
+                    "tp1": float(vorschau["tp1"]),
+                    "tp2": float(vorschau["tp2"]),
+                    "trigger_typ": "Swing-Tief-Bounce",
+                    "trigger_abstand_pct": abstand_pct,
+                }
+
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
-            "aktueller_kurs": letzter_kurs,
-            "letzte_zeit": letztes_datum,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letztes_datum < cooldown_bis,
             "backtest_kennzahlen": backtest_kennzahlen_text(),
             "vorschau": vorschau,
-            "event": aktuelles_event if aktuelles_event and aktuelles_event["zeit"] == letztes_datum else None,
+            "_alert_event": alert_event,
         }
 
 
-
-def bestaetigte_range_widerstaende(stunden, left=2, right=2):
-    """Ermittelt bestätigte 1h-Swing-Highs ohne Look-ahead.
-
-    Ein Hoch an Position i wird erst ab i+right als bekannt betrachtet.
-    Rückgabe: Liste (bestätigungsindex, preis).
-    """
-    highs = stunden["High"].to_numpy(dtype=float)
-    result = []
-    for i in range(left, len(stunden) - right):
-        links = highs[i-left:i]
-        rechts = highs[i+1:i+right+1]
-        if highs[i] >= links.max() and highs[i] > rechts.max():
-            result.append((i + right, float(highs[i])))
-    return result
-
-
-def range_tp_ziele_charttechnisch(stunden, swing_highs, entry_idx, entry, stop):
-    """C1-TP-Logik des MINI DAILY GOLD Range-Ausbruchs.
-
-    TP1: nächster bereits bestätigter Swing-Widerstand >= 1R.
-    TP2: nächster bereits bestätigter Swing-Widerstand >= 3R.
-    Fallback auf 2R/3R, wenn kein passender Widerstand existiert.
-    """
-    r = entry - stop
-    if r <= 0:
-        return entry, entry
-
-    bekannte = sorted({round(preis, 8) for bestaetigung, preis in swing_highs
-                       if bestaetigung <= entry_idx})
-
-    tp1_min = entry + 1.0 * r
-    tp1_kandidaten = [preis for preis in bekannte if preis >= tp1_min]
-    tp1 = min(tp1_kandidaten) if tp1_kandidaten else entry + 2.0 * r
-
-    tp2_min = entry + 3.0 * r
-    tp2_kandidaten = [preis for preis in bekannte if preis >= tp2_min]
-    tp2 = min(tp2_kandidaten) if tp2_kandidaten else entry + 3.0 * r
-
-    if tp2 <= tp1:
-        tp2 = max(tp1, entry + 3.0 * r)
-
-    return float(tp1), float(tp2)
-
 def berechne_range_ausbruch_status():
-    """Simuliert das Range-Ausbruch-Signal (1h, rollierendes 24h-Hoch/-Tief).
-
-    TP1 = erster bereits bestätigter 1h-Swing-Widerstand >= 1R.
-    TP2 = erster bereits bestätigter 1h-Swing-Widerstand >= 3R.
-    Fallback: 2R/3R, falls kein passender Widerstand vorhanden ist.
-    Die Swing-Highs werden mit 2 Kerzen links und 2 rechts bestätigt; ein
-    Swing darf erst nach seiner Bestätigung als Ziel verwendet werden (kein
-    Look-ahead).
-
-    Über die letzten
+    """Simuliert das Range-Ausbruch-Signal (1h, rollierendes 24h-Hoch/-Tief,
+    TP1/TP2=2R/3R analog zum V1e-System) über die letzten
     RANGE_AUSBRUCH_HISTORIE_TAGE Tage und liefert den aktuellen Stand -
     holt dafür genau EINE zusätzliche Twelve-Data-Anfrage (siehe Kommentar
     bei den RANGE_AUSBRUCH_*-Konstanten weiter oben, warum nicht die volle
@@ -1694,7 +1751,6 @@ def berechne_range_ausbruch_status():
     if len(stunden) < RANGE_AUSBRUCH_FENSTER + 5:
         return {"status": "keine_daten"}
 
-    swing_highs = bestaetigte_range_widerstaende(stunden, left=2, right=2)
     range_hoch_referenz = stunden["High"].rolling(RANGE_AUSBRUCH_FENSTER).max().shift(1)
     range_tief_referenz = stunden["Low"].rolling(RANGE_AUSBRUCH_FENSTER).min().shift(1)
     vola_erlaubt = berechne_volatilitaets_erlaubt(stunden, VOLATILITAETS_FENSTER_KURZ_STUNDEN, VOLATILITAETS_FENSTER_LANG_STUNDEN)
@@ -1705,11 +1761,9 @@ def berechne_range_ausbruch_status():
     entry_zeit = None
     cooldown_bis = None
     letzter_abgeschlossener_trade = None
-    aktuelles_event = None
-    risiko_abgelehnt = None
+    letztes_alert_event = None
 
     for zeit, bar in stunden.iterrows():
-        aktuelles_event = None
         hoch, tief, schluss = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
         ref_hoch = range_hoch_referenz.get(zeit)
         ref_tief = range_tief_referenz.get(zeit)
@@ -1722,22 +1776,15 @@ def berechne_range_ausbruch_status():
                 entry = schluss
                 stop = float(ref_tief)
                 if stop < entry:
-                    risiko_pct = (entry - stop) / entry * 100
-                    if risiko_pct > RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT:
-                        risiko_abgelehnt = {
-                            "einstieg": entry, "stop": stop, "risiko_pct": risiko_pct,
-                            "zeit": zeit
-                        }
-                        continue
-                    tp1, tp2 = range_tp_ziele_charttechnisch(
-                        stunden, swing_highs, stunden.index.get_loc(zeit), entry, stop
-                    )
+                    r = entry - stop
+                    tp1 = entry + 2 * r
+                    tp2 = entry + 3 * r
                     in_position = True
                     stufe = 0
                     entry_zeit = zeit
-                    aktuelles_event = {
-                        "event": "ENTRY", "zeit": zeit, "einstieg": entry,
-                        "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
+                    letztes_alert_event = {
+                        "event": "ENTRY", "zeit": zeit.isoformat(),
+                        "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
                     }
         else:
             if stufe == 2 and pd.notna(ref_tief):
@@ -1747,25 +1794,25 @@ def berechne_range_ausbruch_status():
                     "einstieg_zeit": entry_zeit, "ausstieg_zeit": zeit,
                     "ergebnis_pct": (stop - entry) / entry * 100,
                 }
+                letztes_alert_event = {
+                    "event": "STOP", "zeit": zeit.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                }
                 in_position = False
                 cooldown_bis = zeit + pd.Timedelta(hours=RANGE_AUSBRUCH_COOLDOWN_STUNDEN)
-                aktuelles_event = {
-                    "event": "STOP", "zeit": zeit, "einstieg": entry,
-                    "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
-                }
             elif stufe < 2 and hoch >= tp2:
                 stufe = 2
                 stop = max(stop, tp1)
-                aktuelles_event = {
-                    "event": "TP2", "zeit": zeit, "einstieg": entry,
-                    "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
+                letztes_alert_event = {
+                    "event": "TP2", "zeit": zeit.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
                 }
             elif stufe < 1 and hoch >= tp1:
                 stufe = 1
                 stop = max(stop, entry)
-                aktuelles_event = {
-                    "event": "TP1", "zeit": zeit, "einstieg": entry,
-                    "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe
+                letztes_alert_event = {
+                    "event": "TP1", "zeit": zeit.isoformat(),
+                    "einstieg": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
                 }
 
     letzter_kurs = float(stunden["Close"].iloc[-1])
@@ -1789,7 +1836,7 @@ def berechne_range_ausbruch_status():
             "aktueller_kurs": letzter_kurs,
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_stunden": (letzte_zeit - entry_zeit).total_seconds() / 3600,
-            "event": aktuelles_event if aktuelles_event and aktuelles_event["zeit"] == letzte_zeit else None,
+            "_alert_event": (letztes_alert_event if letztes_alert_event and letztes_alert_event["zeit"] == letzte_zeit.isoformat() else None),
         }
     else:
         heutiges_signal = "VERKAUF"
@@ -1809,128 +1856,75 @@ def berechne_range_ausbruch_status():
             ref_tief_aktuell = float(ref_tief_aktuell)
             if ref_tief_aktuell < ref_hoch_aktuell:
                 r = ref_hoch_aktuell - ref_tief_aktuell
-                risiko_pct = r / ref_hoch_aktuell * 100
-                entry_idx = len(stunden) - 1
-                tp1_vorschau, tp2_vorschau = range_tp_ziele_charttechnisch(
-                    stunden, swing_highs, entry_idx, ref_hoch_aktuell, ref_tief_aktuell
-                )
                 vorschau = {
                     "stop": ref_tief_aktuell,
                     "hypothetischer_einstieg": ref_hoch_aktuell,
                     "einstieg_praezise": True,
-                    "tp1": tp1_vorschau,
-                    "tp2": tp2_vorschau,
-                    "risiko_pct": risiko_pct,
-                    "trade_zulaessig": risiko_pct <= RANGE_AUSBRUCH_MAX_STOP_ABSTAND_PCT,
+                    "tp1": ref_hoch_aktuell + 2 * r,
+                    "tp2": ref_hoch_aktuell + 3 * r,
+                }
+
+        alert_event = None
+        if (
+            heutiges_signal == "KEIN_SIGNAL"
+            and not (cooldown_bis is not None and letzte_zeit < cooldown_bis)
+            and vorschau is not None
+        ):
+            trigger = float(vorschau["hypothetischer_einstieg"])
+            aktueller = float(letzter_kurs)
+            abstand_pct = (trigger - aktueller) / trigger * 100 if trigger else 999.0
+            if 0 <= abstand_pct <= TRADE_ALERT_PREPARE_ABSTAND_PCT:
+                alert_event = {
+                    "event": "PREPARE",
+                    "zeit": letzte_zeit.isoformat(),
+                    "einstieg": trigger,
+                    "stop": float(vorschau["stop"]),
+                    "tp1": float(vorschau["tp1"]),
+                    "tp2": float(vorschau["tp2"]),
+                    "trigger_typ": "24h-Hoch-Ausbruch",
+                    "trigger_abstand_pct": abstand_pct,
                 }
 
         return {
             "status": "keine_position",
             "signal": heutiges_signal,
-            "aktueller_kurs": letzter_kurs,
-            "letzte_zeit": letzte_zeit,
             "letzter_trade": letzter_abgeschlossener_trade,
             "im_cooldown": cooldown_bis is not None and letzte_zeit < cooldown_bis,
             "vorschau": vorschau,
-            "risiko_abgelehnt": risiko_abgelehnt,
-            "event": aktuelles_event if aktuelles_event and aktuelles_event["zeit"] == letzte_zeit else None,
+            "_alert_event": alert_event,
         }
 
 
-# Alert-Vertrag: ENTRY/TP1/TP2/STOP werden fuer 1h und Tageschart als separate
-# Ereignisse geschrieben. Die Mail liefert immer Gold-Entry, Gold-Stop, TP1, TP2;
-# beim 1h-Setup zusaetzlich das harte Maximalrisiko von 0,60 %. WKN, Produkt und
-# Hebel bleiben bewusst beim Nutzer (Empfehlungsbereich 20-30x).
-
 def schreibe_trade_alerts(positionstrading_status, range_ausbruch_status):
-    """Schreibt neue Vorbereitungs- und Ausführungsereignisse.
-
-    PREPARE = Vorlauf, noch KEIN Kauf.
-    ENTRY/TP1/TP2/STOP = tatsächliche Ausführung bzw. Folgeereignis.
-
-    Der Nutzer wählt Produkt und Hebel selbst. PREPARE wird nur ausgegeben,
-    wenn der aktuelle Markt bereits ausreichend nahe am Trigger liegt.
+    """Schreibt ausschließlich die aktuell neu auslösbaren Trade-Events.
+    Die Signalberechnung bleibt vollständig in den beiden Statusfunktionen;
+    diese Funktion übersetzt nur deren letzten Event-/Vorwarnungszustand in
+    das von send_trade_alerts.py erwartete JSON-Format.
     """
     events = []
-
-    # 1) 1h-Range: Vorbereitungsalert nur unterhalb des echten 24h-Triggerkurses.
-    ra = range_ausbruch_status or {}
-    if ra.get("status") == "keine_position":
-        v = ra.get("vorschau") or {}
-        trigger = v.get("hypothetischer_einstieg")
-        aktueller_kurs = ra.get("aktueller_kurs")
-        if trigger and aktueller_kurs and aktueller_kurs < trigger:
-            abstand = (trigger - aktueller_kurs) / trigger * 100
-            if abstand <= RANGE_AUSBRUCH_VORBEREITUNG_ABSTAND_PCT and v.get("trade_zulaessig"):
-                events.append({
-                    "event": "PREPARE",
-                    "zeit": ra.get("letzte_zeit", datetime.now(timezone.utc)),
-                    "einstieg": float(trigger),
-                    "stop": float(v["stop"]),
-                    "tp1": float(v["tp1"]),
-                    "tp2": float(v["tp2"]),
-                    "stufe": 0,
-                    "system": "RANGE_AUSBRUCH_1H",
-                    "event_id": f"RANGE_AUSBRUCH_1H|PREPARE|{float(trigger):.2f}",
-                    "aktueller_kurs": float(aktueller_kurs),
-                    "trigger_kurs": float(trigger),
-                    "trigger_abstand_pct": abstand,
-                    "trigger_typ": "Close über 24h-Hoch",
-                })
-
-    # 2) Tageschart: Vorbereitungsalert bei Annäherung an das 10-Tage-Tief.
-    pt = positionstrading_status or {}
-    v = pt.get("vorschau") or {}
-    trigger = v.get("stop")
-    aktueller_kurs = None
-    if v:
-        aktueller_kurs = v.get("hypothetischer_einstieg")
-    trend_ok = v.get("trend_erfuellt") is True
-    if trigger and aktueller_kurs and trend_ok and aktueller_kurs > trigger:
-        abstand = (aktueller_kurs - trigger) / aktueller_kurs * 100
-        if abstand <= POSITIONSTRADING_VORBEREITUNG_ABSTAND_PCT:
-            events.append({
-                "event": "PREPARE",
-                "zeit": datetime.now(timezone.utc),
-                # Tageschart hat vor dem Bounce keinen exakten Einstieg.
-                # 'einstieg' dient hier nur als Referenzkurs; der echte Entry
-                # ist erst der Schlusskurs der Bounce-Kerze.
-                "einstieg": float(aktueller_kurs),
-                "stop": float(trigger),
-                "tp1": float(v["tp1"]),
-                "tp2": float(v["tp2"]),
-                "stufe": 0,
-                "system": "POSITIONSTRADING",
-                "event_id": f"POSITIONSTRADING|PREPARE|{float(trigger):.2f}",
-                "aktueller_kurs": float(aktueller_kurs),
-                "trigger_kurs": float(trigger),
-                "trigger_abstand_pct": abstand,
-                "trigger_typ": "Bounce am 10-Tage-Tief + Schluss darüber",
-            })
-
-    # 3) Tatsächliche Ereignisse aus beiden Simulationen.
-    for system_name, status in (
+    for system, status in (
         ("POSITIONSTRADING", positionstrading_status),
         ("RANGE_AUSBRUCH_1H", range_ausbruch_status),
     ):
-        event = status.get("event") if status else None
+        event = status.get("_alert_event") if isinstance(status, dict) else None
         if not event:
             continue
-        zeit = event["zeit"]
-        if hasattr(zeit, "isoformat"):
-            zeit = zeit.isoformat()
-        event_out = dict(event)
-        event_out["zeit"] = zeit
-        event_out["system"] = system_name
-        event_out["event_id"] = f"{system_name}|{event['event']}|{zeit}"
-        events.append(event_out)
+        event = dict(event)
+        event["system"] = system
+        if event["event"] == "PREPARE":
+            event_id = (
+                f"{system}:PREPARE:"
+                f"{float(event['einstieg']):.2f}:"
+                f"{float(event['stop']):.2f}"
+            )
+        else:
+            event_id = f"{system}:{event['event']}:{event['zeit']}"
+        event["event_id"] = event_id
+        events.append(event)
 
     with open("trade_alerts.json", "w", encoding="utf-8") as f:
-        json.dump({
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "events": events,
-        }, f, ensure_ascii=False, indent=2)
-    print(f"Trade-Alerts: {len(events)} neues Ereignis/e geschrieben.")
+        json.dump({"events": events}, f, ensure_ascii=False, indent=2)
+    print(f"Trade-Alerts geschrieben: {len(events)} Event(s)")
 
 
 def main():
@@ -1952,6 +1946,7 @@ def main():
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
     szenarien = berechne_szenarien(daten["realtime"], pivots)
+    economic_events_block, _ = briefing_block(days_ahead=7)
     rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien)
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
@@ -1987,8 +1982,8 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status)
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
