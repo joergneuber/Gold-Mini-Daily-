@@ -547,7 +547,7 @@ Intraday-Daten (kurzfristig):
 - Vortages-Tief: {daten['prev_low']:.2f} USD
 - Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
 - Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
-- Vorbörsliche Tendenz: {tendenz}
+- Tendenz zum Schlusskurs: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
@@ -1489,7 +1489,7 @@ MINI DAILY: GOLD
 WICHTIGE US-MARKT-EVENTS
 {economic_events_block}
 
-VORBOERSLICHE TENDENZ
+TENDENZ (ZUM SCHLUSSKURS)
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
 SZENARIEN
@@ -1504,7 +1504,7 @@ UNTERSTUETZUNGEN (INTRADAY)
 REALTIME INDIKATION
 {fmt(daten['realtime'])} USD
 
-SCHLUSSKURS (VORTAG)
+SCHLUSSKURS
 {fmt(daten['prev_close'])} USD
 
 RUECKBLICK
@@ -1552,19 +1552,25 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     def level_liste(werte, farbe):
-        return "".join(
-            f'<span style="display:inline-block;background:#241f16;border-left:3px solid {farbe};'
-            f'padding:6px 12px;margin:4px 6px 4px 0;border-radius:2px;font-family:monospace;">'
+        items = "".join(
+            f'<span class="level-item" style="border-left:3px solid {farbe};">'
             f'{v:,.2f}</span>'.replace(",", "X").replace(".", ",").replace("X", ".")
             for v in werte
         )
+        return f'<div class="level-list">{items}</div>'
 
     szenarien = berechne_szenarien(daten["realtime"], pivots)
 
     def szenario_zeile(emoji, label, farbe, hintergrund, bedingung, ziel):
+        if label == "NEUTRAL":
+            klasse = "scenario-row scenario-row-neutral"
+        elif label == "BÄRISCH":
+            klasse = "scenario-row scenario-row-bearish"
+        else:
+            klasse = "scenario-row"
         return (
-            f'<p style="background:{hintergrund};border-left:3px solid {farbe};padding:8px 14px;'
-            f'margin:4px 0;">{emoji} <strong>{label}</strong> {bedingung}{ziel}</p>'
+            f'<p class="{klasse}" style="background:{hintergrund};border-left-color:{farbe};">'
+            f'{emoji} <strong>{label}</strong> {bedingung}{ziel}</p>'
         )
 
     szenarien_html = ""
@@ -1592,8 +1598,92 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </div>
     <hr style="border-color:#3a3226;">
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
-    <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
+    <style>
+      .market-snapshot {{
+        display:grid;
+        grid-template-columns:repeat(3, minmax(0, 1fr));
+        gap:16px;
+        margin:16px 0 18px 0;
+      }}
+      .market-card {{
+        min-width:0;
+        box-sizing:border-box;
+        border:1px solid #3a3226;
+        border-radius:5px;
+        background:#17140f;
+        padding:14px 16px 13px 16px;
+        overflow:hidden;
+      }}
+      .market-card-label {{
+        color:#a89d87;
+        font-size:12px;
+        letter-spacing:1px;
+        text-transform:uppercase;
+        line-height:1.25;
+        margin:0 0 8px 0;
+        white-space:normal;
+      }}
+      .market-card-value {{
+        margin:0;
+        font-family:serif;
+        font-size:24px;
+        line-height:1.2;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+      }}
+      .market-card-realtime .market-card-value {{
+        color:#e8b95c;
+        font-size:27px;
+      }}
+      .market-card-tendency .market-card-value {{
+        font-size:21px;
+      }}
+      .scenario-row {{
+        padding:8px 12px;
+        margin:4px 0;
+        line-height:1.4;
+        font-size:13px;
+        overflow-wrap:anywhere;
+      }}
+      .level-list {{
+        display:flex;
+        flex-wrap:wrap;
+        gap:6px;
+      }}
+      .level-item {{
+        display:inline-block;
+        box-sizing:border-box;
+        white-space:nowrap;
+        padding:6px 12px;
+        margin:0;
+        background:#241f16;
+        border-radius:2px;
+        font-family:monospace;
+        font-size:12px;
+      }}
+      @media (max-width:800px) {{
+        .market-snapshot {{ grid-template-columns:1fr; }}
+        .market-card-value,
+        .market-card-realtime .market-card-value,
+        .market-card-tendency .market-card-value {{ font-size:21px; }}
+      }}
+    </style>
+
+    <div class="market-snapshot">
+      <div class="market-card market-card-realtime">
+        <p class="market-card-label">Realtime Indikation</p>
+        <p class="market-card-value">{daten['realtime']:,.2f} USD</p>
+      </div>
+      <div class="market-card market-card-tendency">
+        <p class="market-card-label">Tendenz (zum Schlusskurs)</p>
+        <p class="market-card-value">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
+      </div>
+      <div class="market-card">
+        <p class="market-card-label">Schlusskurs</p>
+        <p class="market-card-value">{daten['prev_close']:,.2f} USD</p>
+      </div>
+    </div>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
     {szenarien_html}
@@ -1603,12 +1693,6 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Unterstützungen (Intraday)</h3>
     <div>{level_liste(pivots['s'], '#7fae6f')}</div>
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Realtime Indikation</h3>
-    <p style="font-size:28px;font-family:serif;color:#e8b95c;">{daten['realtime']:,.2f} USD</p>
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Schlusskurs (Vortag)</h3>
-    <p style="font-size:20px;font-family:serif;">{daten['prev_close']:,.2f} USD</p>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Rückblick</h3>
     <p style="line-height:1.6;">{rueckblick_text}</p>
