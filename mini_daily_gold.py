@@ -78,6 +78,37 @@ VOLATILITAETS_FENSTER_LANG_STUNDEN = 200
 # bestätigten Entry-Trigger entfernt ist und noch keine Position offen ist.
 TRADE_ALERT_PREPARE_ABSTAND_PCT = 0.5
 
+# Eigene Formations-/Struktur-Parameter für den TAGESCHART (Positionstrading-Basis,
+# ca. 12 Monate Tagesdaten). Bewusst UNABHÄNGIG von den Intraday-Parametern in
+# baue_chart() (finde_trendkanal/finde_range_boxen dort laufen mit ihren eigenen
+# Default-Werten weiter) - ein Trendkanal auf Stundenkerzen braucht ein ganz
+# anderes Zeitfenster als einer auf Tageskerzen.
+TAGESCHART_KANAL_FENSTER = 5          # Swing-Erkennung: +/- 5 Handelstage
+TAGESCHART_KANAL_MIN_PUNKTE = 3       # mind. 3 Swing-Hochs UND 3 Swing-Tiefs für eine Kanal-/Dreiecksformation
+TAGESCHART_RANGE_FENSTER = 6
+TAGESCHART_RANGE_BUCKET_USD = 25
+TAGESCHART_RANGE_SEGMENTE = 3
+TAGESCHART_ZONEN_FENSTER = 4
+TAGESCHART_ZONEN_BUCKET_USD = 25
+TAGESCHART_ZONEN_MIN_TREFFER = 2
+TAGESCHART_ZONEN_TOP_N = 4
+TAGESCHART_ZONEN_MIN_ABSTAND_USD = 50  # zwei Zonen näher als dieser Wert werden zusammengelegt
+
+# Eigene Formations-/Struktur-Parameter für den 6-MONATS-CHART (vormals 4 Monate).
+# Größere Swing-/Bucket-Fenster als beim Tageschart, weil hier die übergeordnete
+# Bewegung interessiert, nicht die Feinstruktur der letzten Wochen.
+LANGFRIST_MONATE = 6
+LANGFRIST_KANAL_FENSTER = 8
+LANGFRIST_KANAL_MIN_PUNKTE = 3
+LANGFRIST_RANGE_FENSTER = 8
+LANGFRIST_RANGE_BUCKET_USD = 45
+LANGFRIST_RANGE_SEGMENTE = 3
+LANGFRIST_ZONEN_FENSTER = 6
+LANGFRIST_ZONEN_BUCKET_USD = 45
+LANGFRIST_ZONEN_MIN_TREFFER = 2
+LANGFRIST_ZONEN_TOP_N = 4
+LANGFRIST_ZONEN_MIN_ABSTAND_USD = 90  # zwei Zonen näher als dieser Wert werden zusammengelegt
+
 
 def berechne_atr(daten, fenster):
     """Average True Range über `fenster` Perioden - berücksichtigt auch
@@ -1001,6 +1032,92 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     return pfad
 
 
+def zonen_naechste_filter(zonen, referenz_preis, min_abstand_usd, top_n):
+    """Zwei Nachbesserungen an den rohen Zonen-Clustern aus analysiere_reaktionszonen():
+    1) Zonen, die näher als min_abstand_usd beieinander liegen, werden zu einer
+       Zone zusammengelegt (treffer-gewichteter Mittelpreis, Trefferzahl = Maximum,
+       gleiche Logik wie in kombiniere_zonen - sonst zeigt der Chart zwei fast
+       identische Linien mit eigenen Labels übereinander).
+    2) Statt der treffer-stärksten Zonen werden die top_n Zonen NÄCHSTEN zum
+       aktuellen Kurs behalten - relevanter für die aktuelle Lage als weit
+       entfernte, aber oft bestätigte alte Level, und reduziert nebenbei die
+       Label-Dichte dort, wo der Kurs gerade nicht steht."""
+    def bearbeite(liste):
+        if not liste:
+            return []
+        liste = sorted(liste, key=lambda z: z[0])
+        zusammengefasst = []
+        for preis, treffer in liste:
+            if zusammengefasst and preis - zusammengefasst[-1][0] < min_abstand_usd:
+                alter_preis, alter_treffer = zusammengefasst[-1]
+                neuer_preis = (alter_preis * alter_treffer + preis * treffer) / (alter_treffer + treffer)
+                zusammengefasst[-1] = (neuer_preis, max(alter_treffer, treffer))
+            else:
+                zusammengefasst.append((preis, treffer))
+        zusammengefasst.sort(key=lambda z: abs(z[0] - referenz_preis))
+        return zusammengefasst[:top_n]
+
+    return {
+        "widerstandszonen": bearbeite(zonen.get("widerstandszonen", [])),
+        "supportzonen": bearbeite(zonen.get("supportzonen", [])),
+    }
+
+
+def platziere_labels_kollisionsfrei(ax, x_pos, eintraege, ha="left", min_abstand_px=15):
+    """Platziert mehrere Text-Label auf derselben X-Position (z.B. rechter oder
+    linker Chartrand) so, dass sie sich nicht überlappen: nach dem eigentlichen
+    Y-Wert (Preis) sortiert, bei zu geringem Pixelabstand wird das jeweils höher
+    liegende Label so weit nach oben verschoben, bis der Mindestabstand
+    eingehalten ist - Reihenfolge bleibt erhalten, nur der Abstand wird korrigiert.
+    Der nötige Abstand skaliert dabei mit der Schriftgröße der beiden beteiligten
+    Label (größere/fette Label brauchen mehr Platz als die kleinen Struktur-Zonen-
+    Label) - min_abstand_px ist nur die Untergrenze für die kleinsten Label.
+    Arbeitet in Pixelkoordinaten (nicht Preis-USD), damit der Mindestabstand
+    unabhängig vom Kursniveau und der Chart-Skalierung funktioniert. Muss
+    aufgerufen werden, NACHDEM die endgültigen Achsengrenzen feststehen (nach
+    ax.margins()/tight_layout()), sonst stimmt die Pixel-Umrechnung nicht.
+    eintraege: Liste von Dicts mit mind. 'y' (Preis) und 'text', optional 'color',
+    'fontsize', 'fontweight', 'style'."""
+    if not eintraege:
+        return
+    eintraege = sorted(eintraege, key=lambda e: e["y"])
+    y_px = [ax.transData.transform((0, e["y"]))[1] for e in eintraege]
+    for i in range(1, len(y_px)):
+        noetiger_abstand = max(min_abstand_px,
+                                 (eintraege[i].get("fontsize", 8.5) + eintraege[i - 1].get("fontsize", 8.5)) * 1.15)
+        if y_px[i] - y_px[i - 1] < noetiger_abstand:
+            y_px[i] = y_px[i - 1] + noetiger_abstand
+    inv = ax.transData.inverted()
+    for e, ypx in zip(eintraege, y_px):
+        y_data = inv.transform((0, ypx))[1]
+        ax.text(x_pos, y_data, e["text"], color=e.get("color", "#ece6d9"),
+                 fontsize=e.get("fontsize", 8.5), fontweight=e.get("fontweight", "normal"),
+                 style=e.get("style", "normal"), va="center", ha=ha, zorder=e.get("zorder", 6))
+
+
+def zeichne_range_box(ax, x_start_num, x_end_num, tief, hoch, referenz_spanne, min_anteil=0.012,
+                        farbe="#e8e0c8", zorder=3):
+    """Zeichnet eine Range-Box mit erzwungener Mindesthöhe (min_anteil der sichtbaren
+    Kursspanne) UND einer schwachen Flächenfüllung. Ohne beides kann eine sehr enge
+    Range (Support/Widerstand nur wenige USD auseinander) bei der Chart-Skalierung
+    als reine Umriss-Linie praktisch unsichtbar werden, während das zugehörige
+    'Range'-Textlabel daneben trotzdem normal groß und sichtbar bleibt - wirkt dann
+    wie ein Label ohne zugehörige Box. Gibt den (ggf. angepassten) oberen Rand zurück,
+    damit das Textlabel an der tatsächlich gezeichneten Boxkante andockt."""
+    hoehe = hoch - tief
+    mindesthoehe = referenz_spanne * min_anteil
+    if hoehe < mindesthoehe:
+        mitte = (hoch + tief) / 2
+        tief = mitte - mindesthoehe / 2
+        hoch = mitte + mindesthoehe / 2
+    breite = x_end_num - x_start_num
+    ax.add_patch(Rectangle((x_start_num, tief), breite, hoch - tief,
+                             linewidth=0, facecolor=farbe, alpha=0.12, zorder=zorder))
+    ax.add_patch(Rectangle((x_start_num, tief), breite, hoch - tief,
+                             linewidth=1.3, edgecolor=farbe, facecolor="none", alpha=0.85, zorder=zorder + 1))
+    return hoch
+
+
 def baue_tageschart(daily, status, pfad="chart_tages.png"):
     """Tageschart (ca. 12 Monate) auf genau der Datenbasis, auf der das
     Positionstrading-Signal beruht: 50-Tage-Trend, 10-Tage-Swing-Tief-Referenz,
@@ -1014,8 +1131,80 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     schluss = daily["Close"]
     ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
 
+    # Zwei rechte Spalten statt einer einzigen Liste: Spalte A (nah am Chartende)
+    # für den aktuellen Zustand/Trade, Spalte B (weiter rechts versetzt) für die
+    # strukturellen Zonen. So bleibt alles auf der rechten Seite, ohne dass eine
+    # einzige lange Liste aus Trade-Info und Hintergrund-Zonen durcheinandergerät.
+    rechte_labels = []      # Spalte A: Kanal/Trend/Swing-Tief/Einstieg/Stop/TP
+    ferne_labels = []       # Spalte B: strukturelle Zonen + ggf. Range am rechten Rand
+    gesamtspanne_tage = (daily.index[-1] - daily.index[0]).days or 1
+    x_spalte_b = daily.index[-1] + pd.Timedelta(days=int(gesamtspanne_tage * 0.30))
+
+    # NEU: eigener Trendkanal + Formationserkennung (Swing-Hochs/-Tiefs über die
+    # gesamte dargestellte Historie, eigene Parameter TAGESCHART_KANAL_*, unabhängig
+    # vom Intraday-Chart). Läuft zusätzlich zur bestehenden 50T-Trendlinie unten,
+    # nicht anstelle davon - beide beantworten unterschiedliche Fragen (Positions-
+    # trading-Trendfilter vs. sichtbare Kanal-/Dreiecksstruktur).
+    tages_kanal = finde_trendkanal(daily, fenster=TAGESCHART_KANAL_FENSTER, min_punkte=TAGESCHART_KANAL_MIN_PUNKTE)
+    if tages_kanal is not None:
+        x_num_rand = mdates.date2num([daily.index[0], daily.index[-1]])
+        steigung_oben, achse_oben = tages_kanal["obere_linie"]
+        steigung_unten, achse_unten = tages_kanal["untere_linie"]
+        y_oben_linie = steigung_oben * x_num_rand + achse_oben
+        y_unten_linie = steigung_unten * x_num_rand + achse_unten
+        ax.plot(daily.index[[0, -1]], y_oben_linie, color="#d9534f", linewidth=1.3,
+                 linestyle="-", alpha=0.75, zorder=4)
+        ax.plot(daily.index[[0, -1]], y_unten_linie, color="#5cb85c", linewidth=1.3,
+                 linestyle="-", alpha=0.75, zorder=4)
+        rechte_labels.append({"y": max(y_oben_linie[-1], y_unten_linie[-1]), "text": f"  {tages_kanal['formation']}",
+                               "color": "#e8b95c", "fontsize": 9.5, "fontweight": "bold"})
+
+    # NEU: Range-Boxen (mehrfach berührte Support-/Widerstandslevel innerhalb eines
+    # Zeitabschnitts), eigene Parameter TAGESCHART_RANGE_*.
+    referenz_spanne = float(daily["High"].max() - daily["Low"].min())
+    tages_range_boxen = finde_range_boxen(daily, fenster=TAGESCHART_RANGE_FENSTER,
+                                            bucket_usd=TAGESCHART_RANGE_BUCKET_USD,
+                                            min_treffer=2, segmente=TAGESCHART_RANGE_SEGMENTE)
+    for start_zeit, end_zeit, tief, hoch in tages_range_boxen:
+        x_start = mdates.date2num(start_zeit)
+        x_end = mdates.date2num(end_zeit)
+        hoch_sichtbar = zeichne_range_box(ax, x_start, x_end, tief, hoch, referenz_spanne)
+        # Liegt die Box nah am aktuellen (rechten) Rand, landet ihr Label sonst genau
+        # in Spalte A und kann mit Kanal/Trend/Swing-Tief kollidieren, ohne dass das
+        # Kollisionssystem davon weiß. Dann in Spalte B einreihen (strukturell, passt
+        # dort ohnehin besser hin) statt separat direkt an der Box zu zeichnen - bei
+        # Boxen weiter links bleibt das Label wie bisher direkt neben der Box.
+        if (daily.index[-1] - end_zeit).days < gesamtspanne_tage * 0.15:
+            ferne_labels.append({"y": hoch_sichtbar, "text": "Range", "color": "#e8e0c8",
+                                  "fontsize": 8, "style": "italic"})
+        else:
+            ax.text(end_zeit, hoch_sichtbar, " Range", color="#e8e0c8", fontsize=8, style="italic", va="bottom", ha="left")
+
+    # NEU: eigene strukturelle Support-/Widerstandszonen direkt aus diesem Chart-
+    # Zeitraum (nicht die Intraday-Pivot-Level und nicht die 3M/6M/36M-Zonen des
+    # 6-Monats-Charts - eine dritte, unabhängige Berechnung auf Tagesbasis).
+    # Danach zonen_naechste_filter: nah beieinanderliegende Zonen zusammenlegen und
+    # nur die top_n NÄCHSTEN zum aktuellen Kurs behalten (statt der treffer-stärksten).
+    tages_zonen_roh = analysiere_reaktionszonen(daily, fenster=TAGESCHART_ZONEN_FENSTER,
+                                                  bucket_usd=TAGESCHART_ZONEN_BUCKET_USD,
+                                                  min_treffer=TAGESCHART_ZONEN_MIN_TREFFER,
+                                                  top_n=TAGESCHART_ZONEN_TOP_N * 3)
+    tages_zonen = zonen_naechste_filter(tages_zonen_roh, referenz_preis=float(schluss.iloc[-1]),
+                                          min_abstand_usd=TAGESCHART_ZONEN_MIN_ABSTAND_USD,
+                                          top_n=TAGESCHART_ZONEN_TOP_N)
+    for preis, treffer in tages_zonen["widerstandszonen"]:
+        ax.axhline(preis, color="#8a5245", linewidth=0.9, linestyle=":", alpha=0.65, zorder=2)
+        ferne_labels.append({"y": preis, "text": f"Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+                              "color": "#c98f7f", "fontsize": 7.5})
+    for preis, treffer in tages_zonen["supportzonen"]:
+        ax.axhline(preis, color="#4f6f47", linewidth=0.9, linestyle=":", alpha=0.65, zorder=2)
+        ferne_labels.append({"y": preis, "text": f"Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+                              "color": "#9fcf8f", "fontsize": 7.5})
+
     # 50-Tage-Trend (gleiche Methode wie im Positionstrading-Signal) über den
-    # letzten verfügbaren Ausschnitt dieses Charts eingezeichnet.
+    # letzten verfügbaren Ausschnitt dieses Charts eingezeichnet. Label rechts,
+    # am aktuellen (rechten) Ende der Linie - konsistent mit allen anderen
+    # "aktueller Zustand"-Labels, statt mitten im Chart am Linienanfang zu kleben.
     trend_ausschnitt = schluss.iloc[-POSITIONSTRADING_TREND_FENSTER:] if len(schluss) >= POSITIONSTRADING_TREND_FENSTER else schluss
     x_num = mdates.date2num(trend_ausschnitt.index)
     steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
@@ -1023,31 +1212,32 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
     trend_label = "Aufwärtstrend (50T)" if steigung > 0 else "Abwärtstrend (50T)"
     ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8, zorder=5)
-    ax.text(trend_ausschnitt.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
-             fontsize=9.5, fontweight="bold", va="bottom", ha="right")
+    rechte_labels.append({"y": trend_werte[-1], "text": f"  {trend_label}", "color": trend_farbe,
+                           "fontsize": 9.5, "fontweight": "bold"})
 
     # Rollierendes 10-Tage-Swing-Tief - dieselbe Referenz, die für Einstieg/Stop genutzt wird.
     swing_tief = daily["Low"].rolling(POSITIONSTRADING_SWING_FENSTER).min().shift(1)
     ax.plot(daily.index, swing_tief, color="#6fa8dc", linewidth=0.9, linestyle=":", alpha=0.7)
-    ax.text(daily.index[-1], swing_tief.iloc[-1], "  10T-Swing-Tief", color="#6fa8dc",
-             fontsize=8, style="italic", va="center", ha="left")
+    rechte_labels.append({"y": swing_tief.iloc[-1], "text": "  10T-Swing-Tief", "color": "#6fa8dc",
+                           "fontsize": 8, "style": "italic"})
 
     # Falls aktuell eine Position offen ist: Einstieg/Stop/TP1/TP2 einzeichnen.
+    # Alles rechts (wie Stop/TP1/TP2), damit die gesamte Trade-Information an einer
+    # Stelle steht statt über beide Chartseiten verteilt.
     if status["status"] == "offen":
         ax.axhline(status["einstieg"], color="#c9c2b0", linewidth=1.0, linestyle=":", alpha=0.8)
-        ax.text(daily.index[0], status["einstieg"], "Einstieg  ", color="#c9c2b0",
-                 fontsize=8.5, va="bottom", ha="right")
+        rechte_labels.append({"y": status["einstieg"], "text": " Einstieg", "color": "#c9c2b0", "fontsize": 8.5})
         ax.axhline(status["stop"], color="#d9534f", linewidth=1.2, linestyle="--", alpha=0.85)
-        ax.text(daily.index[-1], status["stop"], f" Stop {status['stop']:,.0f}".replace(",", "."),
-                 color="#e8887a", fontsize=8.5, fontweight="bold", va="center", ha="left")
+        rechte_labels.append({"y": status["stop"], "text": f" Stop {status['stop']:,.0f}".replace(",", "."),
+                               "color": "#e8887a", "fontsize": 8.5, "fontweight": "bold"})
         ax.axhline(status["tp1"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.7)
-        ax.text(daily.index[-1], status["tp1"], f" TP1 {status['tp1']:,.0f}".replace(",", "."),
-                 color="#9fcf8f", fontsize=8, va="center", ha="left")
+        rechte_labels.append({"y": status["tp1"], "text": f" TP1 {status['tp1']:,.0f}".replace(",", "."),
+                               "color": "#9fcf8f", "fontsize": 8})
         ax.axhline(status["tp2"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.5)
-        ax.text(daily.index[-1], status["tp2"], f" TP2 {status['tp2']:,.0f}".replace(",", "."),
-                 color="#9fcf8f", fontsize=8, va="center", ha="left")
+        rechte_labels.append({"y": status["tp2"], "text": f" TP2 {status['tp2']:,.0f}".replace(",", "."),
+                               "color": "#9fcf8f", "fontsize": 8})
 
-    ax.margins(x=0.10)
+    ax.margins(x=0.14)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     ax.tick_params(colors="#a89d87", labelsize=10)
     for spine in ax.spines.values():
@@ -1057,14 +1247,28 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
     fig.tight_layout()
-    fig.savefig(pfad, facecolor=fig.get_facecolor())
+    # Erst jetzt, nachdem die endgültigen Achsengrenzen feststehen, die gesammelten
+    # Label kollisionsfrei setzen (siehe platziere_labels_kollisionsfrei) - Spalte A
+    # (Trade/aktueller Zustand) nah am Chart, Spalte B (strukturelle Zonen) versetzt
+    # weiter rechts, mit kleiner Kopfzeile zur Orientierung.
+    if rechte_labels:
+        ax.text(daily.index[-1], ax.get_ylim()[1], "AKTUELL", color="#6b6354", fontsize=7,
+                 fontweight="bold", va="bottom", ha="left")
+    if ferne_labels:
+        ax.text(x_spalte_b, ax.get_ylim()[1], "STRUKTUR", color="#6b6354", fontsize=7,
+                 fontweight="bold", va="bottom", ha="left")
+    platziere_labels_kollisionsfrei(ax, daily.index[-1], rechte_labels, ha="left")
+    platziere_labels_kollisionsfrei(ax, x_spalte_b, ferne_labels, ha="left")
+    fig.savefig(pfad, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
     return pfad
 
 
 def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
-    """4-Monats-Tageschart mit den bereits berechneten Reaktionszonen als Linien -
-    macht sichtbar, wo die im Rückblick-Text genannten strukturellen Zonen herkommen."""
+    """6-Monats-Tageschart mit eigenem Trendkanal, Formationserkennung, Range-Boxen
+    und strukturellen Zonen (eigene, größere Parameter, siehe LANGFRIST_*), plus
+    den bereits berechneten Reaktionszonen als Linien - macht sichtbar, wo die im
+    Rückblick-Text genannten strukturellen Zonen herkommen."""
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
     ax.set_facecolor("#14110d")
@@ -1072,57 +1276,118 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     schluss = daily["Close"]
     ax.plot(daily.index, schluss, color="#e8b95c", linewidth=1.3)
 
-    # Trendlinie über den gesamten dargestellten Zeitraum (anders als beim Intraday-Chart,
-    # wo nur die jüngere Hälfte genutzt wird - hier soll die übergeordnete 4-Monats-Bewegung
-    # abgebildet werden, nicht nur ein kurzer Ausschnitt)
-    x_num = mdates.date2num(schluss.index)
-    steigung, achsenabschnitt = np.polyfit(x_num, schluss.values, 1)
-    trend_werte = steigung * x_num + achsenabschnitt
-    trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
-    trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
-    ax.plot(schluss.index, trend_werte, color=trend_farbe, linewidth=1.8,
-             linestyle="-", alpha=0.9, zorder=5)
-    ax.text(schluss.index[0], trend_werte[0], f"{trend_label}  ", color=trend_farbe,
-             fontsize=10, fontweight="bold", va="bottom", ha="left")
+    rechte_labels = []      # Spalte A: Kanal-/Trendformation (aktueller Zustand)
+    ferne_labels = []       # Spalte B: alle strukturellen Zonen (6M-Struktur + bestehende Reaktionszonen)
+    gesamtspanne_tage = (daily.index[-1] - daily.index[0]).days or 1
+    x_spalte_b = daily.index[-1] + pd.Timedelta(days=int(gesamtspanne_tage * 0.30))
 
-    # Range-Boxen: gleiche Berührungs-basierte Erkennung wie im Intraday-Chart, aber
-    # in 3 zeitliche Abschnitte segmentiert - über 4 Monate kann es mehrere getrennte
-    # Ranges auf unterschiedlichen Kursniveaus geben, nicht nur eine einzige.
-    range_boxen = finde_range_boxen(daily, fenster=5, bucket_usd=30, min_treffer=2, segmente=3)
+    # Übergeordneter Trendkanal + Formationserkennung - gleiche Methode wie im
+    # Tageschart (finde_trendkanal), aber mit größeren Swing-Parametern
+    # (LANGFRIST_KANAL_*, eigenständig von TAGESCHART_KANAL_* und vom Intraday-
+    # Chart). Fällt auf die einfache lineare Regression zurück, wenn zu wenig
+    # Swing-Punkte für eine Kanal-/Dreiecksformation gefunden wurden.
+    lang_kanal = finde_trendkanal(daily, fenster=LANGFRIST_KANAL_FENSTER, min_punkte=LANGFRIST_KANAL_MIN_PUNKTE)
+    if lang_kanal is not None:
+        x_num_rand = mdates.date2num([daily.index[0], daily.index[-1]])
+        steigung_oben, achse_oben = lang_kanal["obere_linie"]
+        steigung_unten, achse_unten = lang_kanal["untere_linie"]
+        y_oben_linie = steigung_oben * x_num_rand + achse_oben
+        y_unten_linie = steigung_unten * x_num_rand + achse_unten
+        ax.plot(daily.index[[0, -1]], y_oben_linie, color="#d9534f", linewidth=1.6,
+                 linestyle="-", alpha=0.85, zorder=5)
+        ax.plot(daily.index[[0, -1]], y_unten_linie, color="#5cb85c", linewidth=1.6,
+                 linestyle="-", alpha=0.85, zorder=5)
+        rechte_labels.append({"y": max(y_oben_linie[-1], y_unten_linie[-1]), "text": f"  {lang_kanal['formation']}",
+                               "color": "#e8b95c", "fontsize": 10, "fontweight": "bold"})
+    else:
+        # Fallback: einfache lineare Regression über den gesamten dargestellten
+        # Zeitraum (bisheriges Verhalten, falls die Kanalerkennung mangels
+        # Swing-Punkten kein Ergebnis liefert). Label rechts, konsistent mit dem
+        # Kanal-Fall oben.
+        x_num = mdates.date2num(schluss.index)
+        steigung, achsenabschnitt = np.polyfit(x_num, schluss.values, 1)
+        trend_werte = steigung * x_num + achsenabschnitt
+        trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
+        trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
+        ax.plot(schluss.index, trend_werte, color=trend_farbe, linewidth=1.8,
+                 linestyle="-", alpha=0.9, zorder=5)
+        rechte_labels.append({"y": trend_werte[-1], "text": f"  {trend_label}", "color": trend_farbe,
+                               "fontsize": 10, "fontweight": "bold"})
+
+    # Range-Boxen: gleiche Berührungs-basierte Erkennung wie im Tageschart, aber mit
+    # größeren Struktur-Parametern (LANGFRIST_RANGE_*) - über 6 Monate kann es
+    # mehrere getrennte Ranges auf unterschiedlichen Kursniveaus geben.
+    range_boxen = finde_range_boxen(daily, fenster=LANGFRIST_RANGE_FENSTER,
+                                      bucket_usd=LANGFRIST_RANGE_BUCKET_USD, min_treffer=2,
+                                      segmente=LANGFRIST_RANGE_SEGMENTE)
+    referenz_spanne = float(daily["High"].max() - daily["Low"].min())
     for start_zeit, end_zeit, tief, hoch in range_boxen:
         x_start = mdates.date2num(start_zeit)
         x_end = mdates.date2num(end_zeit)
-        ax.add_patch(Rectangle(
-            (x_start, tief), x_end - x_start, hoch - tief,
-            linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
-        ))
-        ax.text(end_zeit, hoch, " Range", color="#e8e0c8", fontsize=8.5,
+        hoch_sichtbar = zeichne_range_box(ax, x_start, x_end, tief, hoch, referenz_spanne)
+        ax.text(end_zeit, hoch_sichtbar, " Range", color="#e8e0c8", fontsize=8.5,
                  style="italic", va="bottom", ha="left")
 
+    # NEU: eigene 6M-strukturelle Support-/Widerstandszonen, direkt aus diesem
+    # 6-Monats-Zeitraum berechnet (LANGFRIST_ZONEN_*) - unabhängig von den unten
+    # weiterhin gezeigten, bestehenden Reaktionszonen (die aus dem 3M/6M/36M-
+    # Zonenvergleich in main() stammen). Andere Linienart, damit beide im Chart
+    # unterscheidbar bleiben. zonen_naechste_filter: nah beieinanderliegende Zonen
+    # zusammenlegen und nur die top_n NÄCHSTEN zum aktuellen Kurs behalten.
+    lang_struktur_zonen_roh = analysiere_reaktionszonen(daily, fenster=LANGFRIST_ZONEN_FENSTER,
+                                                           bucket_usd=LANGFRIST_ZONEN_BUCKET_USD,
+                                                           min_treffer=LANGFRIST_ZONEN_MIN_TREFFER,
+                                                           top_n=LANGFRIST_ZONEN_TOP_N * 3)
+    lang_struktur_zonen = zonen_naechste_filter(lang_struktur_zonen_roh, referenz_preis=float(schluss.iloc[-1]),
+                                                  min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
+                                                  top_n=LANGFRIST_ZONEN_TOP_N)
+    for preis, treffer in lang_struktur_zonen["widerstandszonen"]:
+        ax.axhline(preis, color="#8a5245", linewidth=1.0, linestyle="-.", alpha=0.6, zorder=2)
+        ferne_labels.append({"y": preis, "text": f"6M-Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+                              "color": "#c98f7f", "fontsize": 7.5})
+    for preis, treffer in lang_struktur_zonen["supportzonen"]:
+        ax.axhline(preis, color="#4f6f47", linewidth=1.0, linestyle="-.", alpha=0.6, zorder=2)
+        ferne_labels.append({"y": preis, "text": f"6M-Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+                              "color": "#9fcf8f", "fontsize": 7.5})
+
+    # Bestehende Reaktionszonen (3M/6M/36M-Vergleich aus main()) - Spalte B, im
+    # selben preis-sortierten Block wie die 6M-Struktur-Zonen (beides Zonen-Info).
     if zonen:
         for preis, treffer, fenster in zonen["widerstandszonen"]:
             fenster_txt = "/".join(f"{m}M" for m in fenster)
             ax.axhline(preis, color="#b5654f", linewidth=1.0, linestyle="--", alpha=0.8)
-            ax.text(daily.index[-1], preis, f" Widerstand {preis:,.0f} ({treffer}x, {fenster_txt})".replace(",", "."),
-                     color="#e8887a", fontsize=9, fontweight="bold", va="center", ha="left")
+            ferne_labels.append({"y": preis, "text": f"Widerstand {preis:,.0f} ({treffer}x, {fenster_txt})".replace(",", "."),
+                                  "color": "#e8887a", "fontsize": 9, "fontweight": "bold"})
         for preis, treffer, fenster in zonen["supportzonen"]:
             fenster_txt = "/".join(f"{m}M" for m in fenster)
             ax.axhline(preis, color="#7fae6f", linewidth=1.0, linestyle="--", alpha=0.8)
-            ax.text(daily.index[-1], preis, f" Support {preis:,.0f} ({treffer}x, {fenster_txt})".replace(",", "."),
-                     color="#9fcf8f", fontsize=9, fontweight="bold", va="center", ha="left")
+            ferne_labels.append({"y": preis, "text": f"Support {preis:,.0f} ({treffer}x, {fenster_txt})".replace(",", "."),
+                                  "color": "#9fcf8f", "fontsize": 9, "fontweight": "bold"})
 
-    ax.margins(x=0.10)
+    ax.margins(x=0.14)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     ax.tick_params(colors="#a89d87", labelsize=10)
     for spine in ax.spines.values():
         spine.set_color("#3a3226")
     ax.grid(axis="y", color="#2a251c", linewidth=0.6, alpha=0.8)
-    ax.set_title("Gold Spot (XAU/USD) - 4 Monate, strukturelle Reaktionszonen", color="#ece6d9",
+    ax.set_title("Gold Spot (XAU/USD) - 6 Monate, Trendkanal & strukturelle Zonen", color="#ece6d9",
                  fontsize=13, loc="left")
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
     fig.tight_layout()
-    fig.savefig(pfad, facecolor=fig.get_facecolor())
+    # Erst jetzt, nachdem die endgültigen Achsengrenzen feststehen, die gesammelten
+    # Label kollisionsfrei setzen (siehe platziere_labels_kollisionsfrei) - Spalte A
+    # (Kanal/Trend) nah am Chart, Spalte B (strukturelle Zonen) versetzt weiter
+    # rechts, mit kleiner Kopfzeile zur Orientierung.
+    if rechte_labels:
+        ax.text(daily.index[-1], ax.get_ylim()[1], "AKTUELL", color="#6b6354", fontsize=7,
+                 fontweight="bold", va="bottom", ha="left")
+    if ferne_labels:
+        ax.text(x_spalte_b, ax.get_ylim()[1], "STRUKTUR", color="#6b6354", fontsize=7,
+                 fontweight="bold", va="bottom", ha="left")
+    platziere_labels_kollisionsfrei(ax, daily.index[-1], rechte_labels, ha="left")
+    platziere_labels_kollisionsfrei(ax, x_spalte_b, ferne_labels, ha="left")
+    fig.savefig(pfad, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
     return pfad
 
@@ -1446,19 +1711,80 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
             f'margin:4px 0;">{emoji} <strong>{label}</strong> {bedingung}{ziel}</p>'
         )
 
+    def szenario_balken(punkt_farbe, label, label_farbe, hintergrund, rand_farbe, bedingung, ziel):
+        return (
+            f'<tr><td style="background:{hintergrund};border-left:4px solid {rand_farbe};padding:12px 16px;'
+            f'border-radius:4px;" bgcolor="{hintergrund}">'
+            f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{punkt_farbe};'
+            f'margin-right:10px;"></span>'
+            f'<strong style="color:{label_farbe};">{label}</strong> '
+            f'<span style="color:#ece6d9;">{bedingung}{ziel}</span>'
+            f'</td></tr><tr><td style="height:8px;line-height:8px;font-size:1px;">&nbsp;</td></tr>'
+        )
+
     szenarien_html = ""
     if szenarien["naechster_widerstand"] is not None:
         ziel = f" → Ziel {fmt(szenarien['ziel_bullisch'])} USD" if szenarien["ziel_bullisch"] is not None else ""
-        szenarien_html += szenario_zeile("🟢", "BULLISCH", "#5cb85c", "#1a2e1a",
-                                          f"über {fmt(szenarien['naechster_widerstand'])} USD", ziel)
+        szenarien_html += szenario_balken("#5cb85c", "BULLISCH", "#9fe39f", "#132a16", "#3f8f4a",
+                                           f"über {fmt(szenarien['naechster_widerstand'])} USD", ziel)
     if szenarien["naechster_support"] is not None and szenarien["naechster_widerstand"] is not None:
-        szenarien_html += szenario_zeile("🟡", "NEUTRAL", "#d9a441", "#2e2a1a",
-                                          f"zwischen {fmt(szenarien['naechster_support'])} und "
-                                          f"{fmt(szenarien['naechster_widerstand'])} USD", " → abwarten")
+        szenarien_html += szenario_balken("#e0b04a", "NEUTRAL", "#f0d495", "#2e2612", "#a67f2e",
+                                           f"zwischen {fmt(szenarien['naechster_support'])} und "
+                                           f"{fmt(szenarien['naechster_widerstand'])} USD", " → abwarten")
     if szenarien["naechster_support"] is not None:
         ziel = f" → Ziel {fmt(szenarien['ziel_baerisch'])} USD" if szenarien["ziel_baerisch"] is not None else ""
-        szenarien_html += szenario_zeile("🔴", "BÄRISCH", "#d9534f", "#2e1a1a",
-                                          f"unter {fmt(szenarien['naechster_support'])} USD", ziel)
+        szenarien_html += szenario_balken("#d9534f", "BÄRISCH", "#f0a49f", "#2e1414", "#a13f3a",
+                                           f"unter {fmt(szenarien['naechster_support'])} USD", ziel)
+
+    def level_boxen(werte, rand_farbe):
+        """Kachel-Reihe wie im Screenshot: gleich breite, umrandete Boxen nebeneinander.
+        Tabellenbasiert (statt flexbox/grid), damit auch E-Mail-Clients wie Outlook das
+        Layout darstellen; bricht bei schmalen Ansichten automatisch um."""
+        zellen = "".join(
+            f'<td style="padding:4px;">'
+            f'<div style="background:#1c1712;border:1px solid {rand_farbe};border-radius:6px;'
+            f'padding:14px 10px;text-align:center;color:#ece6d9;font-weight:bold;font-size:15px;">'
+            + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            + "</div></td>"
+            for v in werte
+        )
+        return f'<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>{zellen}</tr></table>'
+
+    def kachel(titel, wert_html):
+        return (
+            f'<td style="padding:6px;" valign="top">'
+            f'<div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:16px 18px;">'
+            f'<p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">{titel}</p>'
+            f'{wert_html}'
+            f'</div></td>'
+        )
+
+    def chart_block(titel, cid, signal_text, regeln_text, backtest_text):
+        zeilen = signal_text.split("\n", 1)
+        kopf = zeilen[0]
+        rest = zeilen[1] if len(zeilen) > 1 else ""
+        return f"""
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:26px 0 10px 0;">{titel}</h3>
+    <img src="cid:{cid}" style="max-width:100%;border:1px solid #3a3226;border-radius:6px;">
+    <p style="line-height:1.6;margin-top:12px;"><strong style="color:#e8b95c;">{kopf}</strong><br>{rest}</p>
+    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{regeln_text}</p>
+    <p style="color:#a89d87;font-size:10.5px;">
+    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
+    {backtest_text}
+    </p>"""
+
+    marktevents_html = ""
+    if economic_events_html.strip():
+        marktevents_html = f"""
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:14px 0 20px 0;">
+    <tr><td style="background:#241a0e;border-left:4px solid #d9a441;border-radius:4px;padding:14px 18px;">
+    <p style="color:#e8b95c;font-weight:bold;font-size:13px;letter-spacing:0.5px;margin:0 0 8px 0;">
+    ⚠ WICHTIGE US-MARKTEVENTS</p>
+    <p style="color:#e8c98a;font-size:12.5px;line-height:1.6;margin:0;">
+    📅 {economic_events_html}<br>
+    <span style="color:#a89d87;">Hinweis: Termine können Gold/Volatilität deutlich bewegen. Kein automatisches Trading-Verbot.</span>
+    </p>
+    </td></tr></table>"""
 
     html = f"""
     <html><body style="background:#14110d;color:#ece6d9;font-family:monospace;padding:20px;">
@@ -1466,52 +1792,39 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     <h1 style="color:#e8b95c;font-family:serif;margin-top:0;">Mini Daily: Gold</h1>
     <p style="color:#a89d87;">{heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr</p>
     {warnblock}
-    <div style="background:#2a1d14;border-left:3px solid #d9a441;padding:10px 14px;color:#e8c98a;font-size:12.5px;line-height:1.5;margin:10px 0 16px 0;">
-    {economic_events_html}
-    </div>
-    <hr style="border-color:#3a3226;">
+    {marktevents_html}
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Vorbörsliche Tendenz</h3>
-    <p style="font-size:20px;font-family:serif;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:6px;">
+    <tr>
+    {kachel("Realtime Indikation", f'<p style="font-size:24px;font-family:serif;color:#e8b95c;margin:0;">{fmt(daten["realtime"])} USD</p>')}
+    {kachel("Tendenz (zum Schlusskurs)", f'<p style="font-size:19px;font-family:serif;margin:0;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>')}
+    {kachel("Schlusskurs", f'<p style="font-size:24px;font-family:serif;margin:0;">{fmt(daten["prev_close"])} USD</p>')}
+    </tr>
+    </table>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Szenarien</h3>
-    {szenarien_html}
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:20px 0 8px 0;">Szenarien</h3>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">{szenarien_html}</table>
 
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:10px;">
+    <tr>
+    <td width="50%" valign="top" style="padding-right:8px;">
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Widerstände (Intraday)</h3>
-    <div>{level_liste(pivots['r'], '#b5654f')}</div>
-
+    {level_boxen(pivots['r'], '#8a4a42')}
+    </td>
+    <td width="50%" valign="top" style="padding-left:8px;">
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Unterstützungen (Intraday)</h3>
-    <div>{level_liste(pivots['s'], '#7fae6f')}</div>
+    {level_boxen(pivots['s'], '#4a7a42')}
+    </td>
+    </tr>
+    </table>
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Realtime Indikation</h3>
-    <p style="font-size:28px;font-family:serif;color:#e8b95c;">{daten['realtime']:,.2f} USD</p>
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Schlusskurs (Vortag)</h3>
-    <p style="font-size:20px;font-family:serif;">{daten['prev_close']:,.2f} USD</p>
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Rückblick</h3>
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:22px;">Rückblick</h3>
     <p style="line-height:1.6;">{rueckblick_text}</p>
+    {chart_block("Tageschart (Intraday)", "chart", range_ausbruch_text, RANGE_AUSBRUCH_REGELN_TEXT, RANGE_AUSBRUCH_BACKTEST_TEXT)}
+    {chart_block("Tageschart (Positionstrading-Basis)", "chart_tages", positionstrading_text, POSITIONSTRADING_REGELN_TEXT, positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)'))}
 
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Intraday)</h3>
-    <img src="cid:chart" style="max-width:100%;border:1px solid #3a3226;">
-    <p style="line-height:1.6;margin-top:10px;"><strong style="color:#e8b95c;">{range_ausbruch_text.split(chr(10), 1)[0]}</strong><br>{range_ausbruch_text.split(chr(10), 1)[1] if chr(10) in range_ausbruch_text else ''}</p>
-    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{RANGE_AUSBRUCH_REGELN_TEXT}</p>
-    <p style="color:#a89d87;font-size:10.5px;">
-    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
-    {RANGE_AUSBRUCH_BACKTEST_TEXT}
-    </p>
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Tageschart (Positionstrading-Basis)</h3>
-    <img src="cid:chart_tages" style="max-width:100%;border:1px solid #3a3226;">
-    <p style="line-height:1.6;margin-top:10px;"><strong style="color:#e8b95c;">{positionstrading_text.split(chr(10), 1)[0]}</strong><br>{positionstrading_text.split(chr(10), 1)[1] if chr(10) in positionstrading_text else ''}</p>
-    <p style="color:#a89d87;font-size:11px;line-height:1.5;">{POSITIONSTRADING_REGELN_TEXT}</p>
-    <p style="color:#a89d87;font-size:10.5px;">
-    Rein informativ, kein automatisiertes Handelssignal - Backtest-Kennzahlen
-    {positionstrading_status.get('backtest_kennzahlen', '(keine Kennzahlen verfügbar)')}
-    </p>
-
-    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Struktureller Chart (4 Monate)</h3>
-    <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;">
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:26px 0 10px 0;">Struktureller Chart ({LANGFRIST_MONATE} Monate)</h3>
+    <img src="cid:chart_lang" style="max-width:100%;border:1px solid #3a3226;border-radius:6px;">
 
     <p style="color:#a89d87;font-size:10px;margin-top:24px;">
     Kein Kauf-/Verkaufssignal · reine charttechnische Orientierung · Datenquelle: Twelve Data (XAU/USD)
@@ -1934,9 +2247,9 @@ def main():
 
     zonen_je_zeitraum = {}
     daily_lang = None
-    for monate in (3, 4, 36):
+    for monate in (3, LANGFRIST_MONATE, 36):
         langfrist = hole_langfrist_daten(monate=monate)
-        if monate == 4:
+        if monate == LANGFRIST_MONATE:
             daily_lang = langfrist
         zonen_je_zeitraum[monate] = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
         if zonen_je_zeitraum[monate]:
@@ -1951,13 +2264,13 @@ def main():
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
-    # Für den 4-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/4-Monats-
+    # Für den 6-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/6-Monats-
     # Fenstern (nicht 36M) - deren Zonen stammen aus Daten, die ohnehin im sichtbaren
-    # 4-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
+    # 6-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
     # Fenster bleibt außen vor, weil es auch Zonen aus einem ganz anderen (viel tieferen)
     # historischen Kursniveau liefern kann.
     kombinierte_zonen_lang = kombiniere_zonen(
-        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, 4)}
+        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, LANGFRIST_MONATE)}
     )
 
     range_ausbruch_status = berechne_range_ausbruch_status()
