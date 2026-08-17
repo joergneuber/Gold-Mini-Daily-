@@ -1859,12 +1859,11 @@ def formatiere_crv(status, fmt):
 def formatiere_vorschau(status, fmt):
     """Vorschau auf Stop/Einstieg/TP1/TP2/CRV, wenn AKTUELL keine Position
     offen ist - beantwortet 'wie sähe ein Trade aus, falls das System gleich
-    triggert'. Der Stop bzw. beim Range-Ausbruch der aktuell berechnete System-Einstieg ist
-    bereits als konkreter Wert bekannt; ausgelöst wird der Range-Einstieg aber
-    erst nach einem bestätigten 1h-Schlusskurs über der Breakout-Schwelle.
-    Bei V1e ist der Einstieg nur eine Näherung auf Basis des aktuellen Kurses,
-    weil der echte Trigger einen Bounce mit vorher unbekanntem Schlusskurs
-    braucht (siehe einstieg_praezise-Flag)."""
+    triggert'. Der Stop (bzw. bei Range-Ausbruch auch der Einstieg) ist ein
+    exakter, schon jetzt bekannter Wert; bei V1e ist der Einstieg selbst nur
+    eine Näherung auf Basis des aktuellen Kurses, weil der echte Trigger
+    einen Bounce mit vorher unbekanntem Schlusskurs braucht (siehe
+    einstieg_praezise-Flag)."""
     vorschau = status.get("vorschau")
     if not vorschau:
         return None
@@ -1874,7 +1873,7 @@ def formatiere_vorschau(status, fmt):
     crv1 = (vorschau["tp1"] - vorschau["hypothetischer_einstieg"]) / risiko
     crv2 = (vorschau["tp2"] - vorschau["hypothetischer_einstieg"]) / risiko
     if vorschau.get("einstieg_praezise"):
-        einstieg_label = (f"{fmt(vorschau['hypothetischer_einstieg'])} USD (aktueller System-Einstieg; Auslösung erst nach bestätigtem 1h-Schlusskurs über der Breakout-Schwelle)")
+        einstieg_label = f"{fmt(vorschau['hypothetischer_einstieg'])} USD (exakter künftiger Trigger, kein Näherungswert)"
     else:
         einstieg_label = (
             f"nahe {fmt(vorschau['hypothetischer_einstieg'])} USD (Näherung auf Basis des aktuellen Kurses - "
@@ -2060,7 +2059,6 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
 MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
 {warnzeile}
-WICHTIGE US-MARKT-EVENTS
 {economic_events_block}
 
 VORBOERSLICHE TENDENZ
@@ -2209,11 +2207,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         marktevents_html = f"""
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:14px 0 20px 0;">
     <tr><td style="background:#241a0e;border-left:4px solid #d9a441;border-radius:4px;padding:14px 18px;">
-    <p style="color:#e8b95c;font-weight:bold;font-size:13px;letter-spacing:0.5px;margin:0 0 8px 0;">
-    ⚠ WICHTIGE US-MARKTEVENTS</p>
     <p style="color:#e8c98a;font-size:12.5px;line-height:1.6;margin:0;">
-    📅 {economic_events_html}<br>
-    <span style="color:#a89d87;">Hinweis: Termine können Gold/Volatilität deutlich bewegen. Kein automatisches Trading-Verbot.</span>
+    {economic_events_html}
     </p>
     </td></tr></table>"""
 
