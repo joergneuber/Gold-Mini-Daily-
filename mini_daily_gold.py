@@ -563,9 +563,10 @@ def hole_saisonalitaet_text():
     return None
 
 
-def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien):
+def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, langfrist_formation=None):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
     zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}.
+    langfrist_formation: automatisch erkannte Formation des langfristigen Tagescharts.
     szenarien: Ergebnis von berechne_szenarien() - wird dem Prompt als FESTE Trigger-
     Marken vorgegeben, damit der Rückblick-Text dieselben Zahlen nennt wie der
     SZENARIEN-Block im Report. Vorher leitete Gemini eigene Trigger aus dem
@@ -602,6 +603,19 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien):
     saisonalitaet = hole_saisonalitaet_text()
     saison_block = f"\nSaisonaler Kontext (nur Hintergrundinfo, kein Signal): {saisonalitaet}\n" if saisonalitaet else ""
 
+    if langfrist_formation == "Abwärtskanal":
+        langfrist_block = (
+            "\nLangfristige Chartstruktur (Tageschart): ÜBERGEORDNETER ABWÄRTSKANAL. "
+            "Die aktuelle Bewegung ist als kurzfristige bullische Erholung innerhalb dieser "
+            "übergeordneten Abwärtsstruktur einzuordnen. Formuliere NICHT, der mittelfristige "
+            "Abwärtstrend sei bereits beendet oder durch einen intakten Aufwärtstrendkanal "
+            "ersetzt.\n"
+        )
+    elif langfrist_formation:
+        langfrist_block = f"\nLangfristige Chartstruktur (Tageschart): {langfrist_formation}.\n"
+    else:
+        langfrist_block = ""
+
     szenarien_block = "Bereits festgelegte Szenario-Marken (aus den Pivots abgeleitet, im Report separat als eigener Block gezeigt - NICHT selbst neu herleiten, sondern genau diese Zahlen im Text verwenden):\n"
     if szenarien["naechster_widerstand"] is not None:
         szenarien_block += f"- Aufwärts-Trigger: Ausbruch über {szenarien['naechster_widerstand']:.2f} USD"
@@ -630,6 +644,7 @@ Intraday-Daten (kurzfristig):
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
 {szenarien_block}
+{langfrist_block}
 {saison_block}
 Strukturelle Reaktionszonen (mehrfach bestätigte Hoch-/Tiefpunkte je Zeitfenster - diese
 sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Pivots; kürzere
@@ -655,7 +670,10 @@ spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
 
 Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahmen von
 6-7 Sätzen - fasse dich pro Punkt knapp statt jeden Aspekt breit auszuführen.
-Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert.
+Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert. Wenn die langfristige Chartstruktur als
+Abwärtskanal vorgegeben ist, muss die Einordnung ausdrücklich zwischen kurzfristiger Erholung und
+übergeordneter Abwärtsstruktur unterscheiden; formuliere dann nicht „intakter Aufwärtstrendkanal“.
+
 
 Schließe den Absatz mit exakt zwei Sätzen ab, die explizit mit "Fazit:" beginnen und die
 Lage auf den Punkt bringen (welcher Trend aktuell überwiegt und ob der Aufwärts- oder der
@@ -2023,6 +2041,20 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
     szenarien = berechne_szenarien(daten["realtime"], pivots)
     szenarien_text = formatiere_szenarien(szenarien, fmt)
 
+    # Charttechnischer Trigger und tatsächlicher Range-System-Einstieg sind
+    # bewusst unterschiedliche Größen: Das Range-System löst erst bei einem
+    # bestätigten 1h-Schlusskurs ÜBER der Schwelle aus.
+    system_einordnung = ""
+    range_vorschau = range_ausbruch_status.get("vorschau") if range_ausbruch_status else None
+    if szenarien.get("naechster_widerstand") is not None and range_vorschau:
+        system_einordnung = (
+            f"System-Einordnung: {fmt(szenarien['naechster_widerstand'])} USD ist der "
+            f"charttechnische bullische Trigger. Das Range-Breakout-System benötigt "
+            f"einen bestätigten 1h-Schlusskurs darüber; der aktuelle System-Einstieg "
+            f"liegt daher bei {fmt(range_vorschau['hypothetischer_einstieg'])} USD "
+            f"und kann oberhalb der Trigger-Schwelle liegen."
+        )
+
     text = f"""NEUBER PRECIOUS METALS
 MINI DAILY: GOLD
 {heute} - Erstellt um {erstellt_zeit} Uhr - Kursdaten Stand {daten_zeit} Uhr
@@ -2035,6 +2067,7 @@ VORBOERSLICHE TENDENZ
 
 SZENARIEN
 {szenarien_text}
+{system_einordnung}
 
 WIDERSTAENDE (INTRADAY)
 {liste(pivots['r'])} USD
@@ -2656,8 +2689,20 @@ def main():
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
     szenarien = berechne_szenarien(daten["realtime"], pivots)
+    langfrist_formation = None
+    if daily_lang is not None:
+        lang_kanal = finde_trendkanal(
+            daily_lang,
+            fenster=LANGFRIST_KANAL_FENSTER,
+            min_punkte=LANGFRIST_KANAL_MIN_PUNKTE,
+        )
+        if lang_kanal is not None:
+            langfrist_formation = lang_kanal.get("formation")
     economic_events_block, _ = briefing_block(days_ahead=7)
-    rueckblick_text = generiere_rueckblick(daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien)
+    rueckblick_text = generiere_rueckblick(
+        daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien,
+        langfrist_formation=langfrist_formation,
+    )
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)

@@ -140,10 +140,13 @@ def _fallback_2026():
     dates = [
         ("US CPI", HIGH, "2026-08-12T08:30:00"),
         ("US PPI", MEDIUM, "2026-08-13T08:30:00"),
+        # 19.08.2026 = Minutes der FOMC-Sitzung vom 28./29.07., KEIN Zinsentscheid.
+        ("FOMC Minutes (Juli-Sitzung)", HIGH, "2026-08-19T14:00:00"),
         ("US JOLTS", MEDIUM, "2026-09-01T10:00:00"),
         ("US Employment Situation / NFP", HIGH, "2026-09-04T08:30:00"),
-        ("US CPI", HIGH, "2026-09-11T08:30:00"),
         ("US PPI", MEDIUM, "2026-09-10T08:30:00"),
+        ("US CPI", HIGH, "2026-09-11T08:30:00"),
+        # 16.09.2026 = zweiter Tag der regulären FOMC-Sitzung 15./16.09.
         ("FOMC / Fed-Zinsentscheid", HIGH, "2026-09-16T14:00:00"),
     ]
     return [
@@ -193,6 +196,11 @@ def _fetch_bea():
 
 
 def _fetch_fed():
+    """Liest den offiziellen FOMC-Kalender.
+    Der Zinsentscheid wird auf den ZWEITEN Sitzungstag gelegt (14:00 ET),
+    nicht auf den ersten Tag. Die offiziellen Minutes werden separat
+    als eigenes Ereignis behandelt.
+    """
     html = _get("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm")
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"\s+", " ", text)
@@ -211,7 +219,8 @@ def _fetch_fed():
         if not m:
             continue
         try:
-            dt = datetime(year, num, int(m.group(1)), 14, 0, tzinfo=TZ_ET)
+            day = int(m.group(2) or m.group(1))
+            dt = datetime(year, num, day, 14, 0, tzinfo=TZ_ET)
         except ValueError:
             continue
         out.append({
@@ -220,6 +229,37 @@ def _fetch_fed():
             "datetime": dt.astimezone(TZ_DE).isoformat(),
             "source": "Federal Reserve",
         })
+    if year == 2026:
+        dt = datetime(2026, 8, 19, 14, 0, tzinfo=TZ_ET)
+        out.append({
+            "name": "FOMC Minutes (Juli-Sitzung)",
+            "priority": HIGH,
+            "datetime": dt.astimezone(TZ_DE).isoformat(),
+            "source": "Federal Reserve",
+        })
+    return out
+
+
+def _sanitize_fed_events(events):
+    """Entfernt falsche/veraltete FOMC-Klassifizierungen, insbesondere aus
+    einem alten Cache. Für 2026 sind die offiziellen Sitzungstage bekannt.
+    """
+    if datetime.now(TZ_DE).year != 2026:
+        return events
+    valid_decisions = {
+        "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+        "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+    }
+    valid_minutes = {"2026-08-19"}
+    out = []
+    for e in events:
+        if e.get("name") == "FOMC / Fed-Zinsentscheid":
+            if e.get("datetime", "")[:10] not in valid_decisions:
+                continue
+        elif e.get("name") == "FOMC Minutes (Juli-Sitzung)":
+            if e.get("datetime", "")[:10] not in valid_minutes:
+                continue
+        out.append(e)
     return out
 
 
@@ -245,11 +285,13 @@ def lade_termine(days_ahead: int = 14):
         except Exception as exc:
             errors.append(type(exc).__name__)
 
+    all_events = _sanitize_fed_events(all_events)
     all_events = _dedupe(all_events)
     # Offizieller Feed darf den Fallback nicht "verdrängen", wenn er nur einen
     # Teil der Termine liefert. Die bekannten High-Impact-Termine werden daher
     # immer ergänzt und anschließend dedupliziert.
     all_events.extend(_fallback_2026())
+    all_events = _sanitize_fed_events(all_events)
     all_events = _dedupe(all_events)
 
     all_events = [e for e in all_events if now - timedelta(minutes=15) <= datetime.fromisoformat(e["datetime"]) <= end]
@@ -261,7 +303,8 @@ def lade_termine(days_ahead: int = 14):
     elif CACHE_FILE.exists():
         try:
             cached = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-            all_events = [e for e in cached.get("events", []) if now - timedelta(minutes=15) <= datetime.fromisoformat(e["datetime"]) <= end]
+            cached_events = _sanitize_fed_events(cached.get("events", []))
+            all_events = [e for e in cached_events if now - timedelta(minutes=15) <= datetime.fromisoformat(e["datetime"]) <= end]
         except Exception:
             all_events = []
     return all_events, errors
