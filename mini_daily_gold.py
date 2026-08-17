@@ -86,7 +86,7 @@ TRADE_ALERT_PREPARE_ABSTAND_PCT = 0.5
 TAGESCHART_KANAL_FENSTER = 5          # Swing-Erkennung: +/- 5 Handelstage
 TAGESCHART_KANAL_MIN_PUNKTE = 3       # mind. 3 Swing-Hochs UND 3 Swing-Tiefs für eine Kanal-/Dreiecksformation
 TAGESCHART_RANGE_FENSTER = 6
-TAGESCHART_RANGE_BUCKET_USD = 25
+TAGESCHART_RANGE_BUCKET_USD = 45  # erhöht von 25: 45 USD war zu eng, echte Touches einer Range streuen mehr
 TAGESCHART_RANGE_SEGMENTE = 3
 TAGESCHART_ZONEN_FENSTER = 4
 TAGESCHART_ZONEN_BUCKET_USD = 25
@@ -101,13 +101,34 @@ LANGFRIST_MONATE = 6
 LANGFRIST_KANAL_FENSTER = 8
 LANGFRIST_KANAL_MIN_PUNKTE = 3
 LANGFRIST_RANGE_FENSTER = 8
-LANGFRIST_RANGE_BUCKET_USD = 45
+LANGFRIST_RANGE_BUCKET_USD = 70  # erhöht von 45: reale Widerstands-Touches über 6M streuen oft 100+ USD
 LANGFRIST_RANGE_SEGMENTE = 3
 LANGFRIST_ZONEN_FENSTER = 6
 LANGFRIST_ZONEN_BUCKET_USD = 45
 LANGFRIST_ZONEN_MIN_TREFFER = 2
 LANGFRIST_ZONEN_TOP_N = 4
 LANGFRIST_ZONEN_MIN_ABSTAND_USD = 90  # zwei Zonen näher als dieser Wert werden zusammengelegt
+
+# Zusatzkanal "seit dem letzten großen Hoch/Tief" - der normale Kanal oben rechnet
+# immer über den GESAMTEN Chart-Zeitraum, wodurch z.B. eine lange vorherige
+# Aufwärtsbewegung eine anschließende steilere Korrektur "verwässert" und der Kanal
+# flacher ausfällt als die tatsächliche aktuelle Bewegung. Der Zusatzkanal läuft
+# stattdessen nur ab dem letzten signifikanten Wendepunkt (eigener, GRÖßERER
+# Such-Fenster als die normale Kanal-Formationserkennung, damit nicht jede kleine
+# Zwischenzacke als "der letzte Wendepunkt" zählt).
+TAGESCHART_WENDEPUNKT_FENSTER = 15
+TAGESCHART_ZUSATZKANAL_MIN_LAENGE = 20
+LANGFRIST_WENDEPUNKT_FENSTER = 10
+LANGFRIST_ZUSATZKANAL_MIN_LAENGE = 15
+INTRADAY_WENDEPUNKT_FENSTER = 6
+INTRADAY_ZUSATZKANAL_MIN_LAENGE = 10
+
+# Intraday: eigene, benannte Parameter (vorher direkt als Zahlen im Code) - jetzt
+# konsistent mit Tages-/6M-Chart als eigene Konstanten, unabhängig einstellbar.
+INTRADAY_KANAL_FENSTER = 3
+INTRADAY_KANAL_MIN_PUNKTE = 2
+INTRADAY_RANGE_FENSTER = 4
+INTRADAY_RANGE_BUCKET_USD = 6
 
 
 def berechne_atr(daten, fenster):
@@ -394,12 +415,38 @@ def analysiere_reaktionszonen(daily, fenster=3, bucket_usd=30, min_treffer=2, to
         if lows[i] == fenster_l.min():
             swing_lows.append(lows[i])
 
+    # Die letzten `fenster` Tage können nach obiger Regel NIE als Swing-Punkt zählen,
+    # weil ihnen die künftigen Tage zur Bestätigung fehlen - der aktuelle Kurs kann
+    # dadurch nie eine bestehende Zone bestätigen, selbst wenn er gerade jetzt genau
+    # ein altes Level erneut testet. Deshalb zusätzlich ein einseitiger (nur
+    # rückwärts schauender) Test für die letzten `fenster` Tage: zählt als Swing,
+    # wenn der Tag ein Extremum der bis dahin bekannten (rückwärtigen) Kerzen ist.
+    for i in range(max(fenster, n - fenster), n):
+        fenster_h = highs[max(0, i - fenster):i + 1]
+        if highs[i] == fenster_h.max():
+            swing_highs.append(highs[i])
+        fenster_l = lows[max(0, i - fenster):i + 1]
+        if lows[i] == fenster_l.min():
+            swing_lows.append(lows[i])
+
     def clustern(punkte):
-        buckets = {}
-        for p in punkte:
-            key = round(p / bucket_usd) * bucket_usd
-            buckets.setdefault(key, []).append(p)
-        zonen = [(np.mean(v), len(v)) for v in buckets.values() if len(v) >= min_treffer]
+        # Gleiche Toleranz-Kette wie in finde_range_box, statt starres Preis-Raster
+        # (siehe dortiger Kommentar für den Hintergrund) - PLUS Obergrenze für die
+        # Gesamtspanne eines Clusters (max. 2,5x bucket_usd), sonst kann sich die
+        # Kette durch eine choppy Phase hindurch "durchhangeln" (P1 nah an P2, P2 nah
+        # an P3, ...) und am Ende eine 150 USD breite "Zone" mit 15+ Treffern liefern,
+        # obwohl die Randpunkte preislich nichts mehr miteinander zu tun haben.
+        if not punkte:
+            return []
+        max_spanne = bucket_usd * 2.5
+        punkte_sortiert = sorted(punkte)
+        cluster = [[punkte_sortiert[0]]]
+        for p in punkte_sortiert[1:]:
+            if p - cluster[-1][-1] <= bucket_usd and p - cluster[-1][0] <= max_spanne:
+                cluster[-1].append(p)
+            else:
+                cluster.append([p])
+        zonen = [(np.mean(c), len(c)) for c in cluster if len(c) >= min_treffer]
         zonen.sort(key=lambda z: -z[1])
         return zonen[:top_n]
 
@@ -653,13 +700,30 @@ def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
             swing_lows.append((low.index[i], low.iloc[i]))
 
     def groesstes_cluster(punkte):
-        buckets = {}
-        for zeit, preis in punkte:
-            key = round(preis / bucket_usd) * bucket_usd
-            buckets.setdefault(key, []).append((zeit, preis))
-        if not buckets:
+        # Toleranz-Kette statt starres Preis-Raster: Punkte werden nach Preis sortiert
+        # und so lange in denselben Cluster gepackt, wie der Abstand zum jeweils letzten
+        # Punkt <= bucket_usd ist. Beim starren Raster (round(preis/bucket_usd)*bucket_usd)
+        # können zwei Punkte, die nur wenige USD auseinanderliegen, aber knapp auf
+        # verschiedenen Seiten einer Rastergrenze landen, fälschlich in getrennte Fächer
+        # fallen - beobachtet bei drei Swing-Hochs 150 USD auseinander (4701/4752/4851),
+        # die inhaltlich klar eine Zone bildeten, aber am 45-USD-Raster vorbeigerundet
+        # wurden und dadurch als drei Einzeltreffer statt einem 3er-Cluster zählten.
+        # ABER: die Kette selbst kann sich genauso "durchketten" (P1 nah an P2, P2 nah
+        # an P3, ... obwohl P1 und P10 preislich längst nichts mehr gemeinsam haben) -
+        # deshalb zusätzlich eine Obergrenze für die GESAMTSPANNE eines Clusters
+        # (max. 2,5x bucket_usd), sonst kann ein einzelnes Fenster bereits für sich
+        # allein eine viel zu breite "Zone" liefern.
+        if not punkte:
             return None
-        bestes = max(buckets.values(), key=len)
+        max_spanne = bucket_usd * 2.5
+        punkte_sortiert = sorted(punkte, key=lambda pt: pt[1])
+        cluster = [[punkte_sortiert[0]]]
+        for zeit, preis in punkte_sortiert[1:]:
+            if preis - cluster[-1][-1][1] <= bucket_usd and preis - cluster[-1][0][1] <= max_spanne:
+                cluster[-1].append((zeit, preis))
+            else:
+                cluster.append([(zeit, preis)])
+        bestes = max(cluster, key=len)
         if len(bestes) < min_treffer:
             return None
         zeiten = [z for z, _ in bestes]
@@ -678,25 +742,148 @@ def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
     return start, ende, s_cluster[2], r_cluster[2]
 
 
-def finde_range_boxen(preisreihe, fenster=5, bucket_usd=30, min_treffer=2, segmente=3):
+def finde_range_boxen(preisreihe, fenster=5, bucket_usd=30, min_treffer=2, segmente=3, max_kern_laenge=45):
     """Wie finde_range_box, aber für längere Zeiträume (z.B. 6 Monate) gedacht, in
     denen es mehrere zeitlich getrennte Ranges auf unterschiedlichen Kursniveaus
-    geben kann (z.B. bei einem übergeordneten Trend, der durch mehrere Konsolidierungs-
-    Phasen unterbrochen wird). Teilt den Zeitraum in `segmente` gleich große,
-    chronologische Abschnitte und sucht in jedem Abschnitt separat nach einer Range.
-    Gibt eine Liste von (start_zeit, end_zeit, tief, hoch) zurück, maximal
-    `segmente` Einträge."""
+    geben kann. Arbeitet mit einem GLEITENDEN Fenster (Fensterlänge ~ Gesamtlänge/
+    segmente, Schrittweite ein Drittel davon) statt einer festen Drittelung des
+    Zeitraums - Bugfix: bei fester Drittelung fiel eine Konsolidierung, die zufällig
+    genau über einer Segmentgrenze lag, komplett durchs Raster, weil ihre Berührungen
+    auf zwei Segmente aufgeteilt wurden und in keinem davon allein die Mindestanzahl
+    erreichten (in der Praxis beobachtet: eine mehrwöchige Range wurde dadurch gar
+    nicht erkannt, obwohl sie im Chart deutlich sichtbar war). Überlappende Treffer
+    aus benachbarten Fensterpositionen werden anschließend zu einer Box verschmolzen.
+    max_kern_laenge deckelt die Fenstergröße nach OBEN (in Perioden der preisreihe):
+    ohne diesen Deckel wächst n//segmente mit der Datenmenge unbegrenzt mit, wodurch
+    bei einem längeren Datensatz (z.B. 14 statt 4 Monate) einzelne Kandidatenfenster
+    schon für sich genommen viele Monate lang werden - eine 'Range' soll aber eine
+    zeitlich begrenzte, erkennbare Konsolidierung bleiben und nicht praktisch der
+    gesamte Chart-Zeitraum sein.
+    Gibt eine Liste von (start_zeit, end_zeit, tief, hoch) zurück."""
     n = len(preisreihe)
-    grenzen = np.linspace(0, n, segmente + 1).astype(int)
-    boxen = []
-    for i in range(segmente):
-        teil = preisreihe.iloc[grenzen[i]:grenzen[i + 1]]
-        if len(teil) < 2 * fenster + min_treffer:
-            continue
-        box = finde_range_box(teil, fenster=fenster, bucket_usd=bucket_usd, min_treffer=min_treffer)
-        if box:
-            boxen.append(box)
-    return boxen
+    kern_laenge = min(max(min_treffer + 3, n // segmente), max_kern_laenge)
+    fensterlaenge = kern_laenge + 2 * fenster  # Rand dazurechnen: Punkte nah am Fensterrand
+    # brauchen selbst innerhalb des Fensters noch `fenster` Nachbarn auf beiden Seiten,
+    # um überhaupt als Swing erkannt zu werden - ohne diesen Rand verpasst man Touches,
+    # die knapp am Rand des jeweiligen Fensters liegen.
+    schrittweite = max(1, fenster)  # feine Schrittweite, damit irgendeine Fensterposition
+    # die komplette Range mit ausreichend Rand auf beiden Seiten erfasst
+
+    kandidaten = []
+    start = 0
+    while start < n:
+        ende = min(start + fensterlaenge, n)
+        teil = preisreihe.iloc[start:ende]
+        if len(teil) >= 2 * fenster + min_treffer:
+            box = finde_range_box(teil, fenster=fenster, bucket_usd=bucket_usd, min_treffer=min_treffer)
+            if box:
+                kandidaten.append(box)
+        if ende >= n:
+            break
+        start += schrittweite
+
+    if not kandidaten:
+        return []
+
+    # Kandidaten aus überlappenden Fensterpositionen zu je einer Box verschmelzen -
+    # sonst würde dieselbe Range mehrfach (leicht versetzt) auftauchen, einmal pro
+    # Fensterposition, die sie erfasst hat. ABER mit Obergrenze für Höhe und Dauer:
+    # ohne die kann sich das Verschmelzen durch eine lange, stetige Trendbewegung
+    # "durchketten" (Box A überlappt B, B überlappt C, ... obwohl A und der 20.
+    # Nachfolger preislich längst nichts mehr miteinander zu tun haben) und am Ende
+    # eine einzige Box entstehen, die fast den gesamten Chart-Zeitraum überdeckt -
+    # beobachtet bei einem durchgehenden 14-Monats-Aufwärtstrend, wo daraus eine
+    # "Range" über 289 USD und 413 Tage wurde, obwohl das klar kein echtes Pendeln
+    # zwischen zwei Levels war, sondern nur viele überlappende Zwischenschritte.
+    typischer_abstand = pd.Series(preisreihe.index).diff().median()
+
+    def signifikante_ueberlappung(a, b, min_anteil=0.4):
+        # Ersetzt die vorherige feste Obergrenze für Höhe/Dauer der fusionierten Box:
+        # die verhinderte auch echte Überlappungen, sobald die kombinierte Box größer
+        # als ein typisches Kandidatenfenster wurde (beobachtet an zwei Boxen mit
+        # >50% Zeit- und 93% Preis-Überlappung, die an einer 103-Tage-Dauergrenze
+        # scheiterten, obwohl sie inhaltlich klar dieselbe Range waren). Jetzt zählt
+        # stattdessen der ÜBERLAPPUNGSANTEIL relativ zur kleineren der beiden Boxen -
+        # verhindert weiterhin das Durchketten durch einen langen Trend (dort
+        # überlappen sich aufeinanderfolgende Kandidaten nur an einem kleinen Rand-
+        # stück, nicht großflächig), lässt aber echte, weitgehend deckungsgleiche
+        # Ranges unabhängig von ihrer Gesamtausdehnung zu einer Box verschmelzen.
+        start_a, end_a, tief_a, hoch_a = a
+        start_b, end_b, tief_b, hoch_b = b
+        zeit_overlap = min(end_a, end_b) - max(start_a, start_b)
+        if zeit_overlap <= pd.Timedelta(0):
+            return False
+        zeit_anteil = zeit_overlap / min(end_a - start_a, end_b - start_b)
+        preis_overlap = min(hoch_a, hoch_b) - max(tief_a, tief_b)
+        if preis_overlap <= 0:
+            return False
+        preis_anteil = preis_overlap / min(hoch_a - tief_a, hoch_b - tief_b)
+        return zeit_anteil >= min_anteil and preis_anteil >= min_anteil
+
+    # Gegen JEDE bereits gemergte Box prüfen, nicht nur die zuletzt hinzugefügte:
+    # sonst kann ein Kandidat B, der zwischen A und C liegt, aber selbst nicht mit A
+    # mergen darf, den "Merge-Faden" abreißen lassen - C würde dann nur noch gegen B
+    # geprüft und nicht mehr gegen A, obwohl C und A sich eigentlich überlappen.
+    kandidaten.sort(key=lambda b: b[0])
+    verschmolzen = [list(kandidaten[0])]
+    for start_zeit, end_zeit, tief, hoch in kandidaten[1:]:
+        gemerged = False
+        for box in verschmolzen:
+            if signifikante_ueberlappung(tuple(box), (start_zeit, end_zeit, tief, hoch)):
+                box[0] = min(box[0], start_zeit)
+                box[1] = max(box[1], end_zeit)
+                box[2] = min(box[2], tief)
+                box[3] = max(box[3], hoch)
+                gemerged = True
+                break
+        if not gemerged:
+            verschmolzen.append([start_zeit, end_zeit, tief, hoch])
+
+    # Nach dem Mergen können jetzt (durch die erweiterten Grenzen einzelner Boxen)
+    # neue Überlappungen zwischen bereits gemergten Boxen entstanden sein - deshalb
+    # wiederholen, bis sich nichts mehr ändert (kommt in der Praxis selten öfter als
+    # 1-2x vor, da wenige Boxen übrig bleiben).
+    aenderung = True
+    while aenderung and len(verschmolzen) > 1:
+        aenderung = False
+        neu = []
+        for box in verschmolzen:
+            box = list(box)
+            for ziel in neu:
+                if signifikante_ueberlappung(tuple(ziel), tuple(box)):
+                    ziel[0] = min(ziel[0], box[0]); ziel[1] = max(ziel[1], box[1])
+                    ziel[2] = min(ziel[2], box[2]); ziel[3] = max(ziel[3], box[3])
+                    aenderung = True
+                    break
+            else:
+                neu.append(box)
+        verschmolzen = neu
+
+    # Nachträgliche Qualitätsprüfung: jede fertig gemergte Box gegen die TATSÄCHLICHEN
+    # Kursdaten in ihrem eigenen (nach dem Mergen ggf. vergrößerten) Zeitfenster
+    # validieren, statt sich nur auf die Konstruktion aus den einzelnen Kandidaten-
+    # fenstern zu verlassen. Beobachtet: eine Box mit nur 2 Berührungen am Tief aber
+    # 24 am Hoch und 12 von 50 Schlusskursen außerhalb der Box - konstruktionsbedingt
+    # "gültig" (min_treffer=2 auf beiden Seiten erreicht), aber keine echte, beidseitig
+    # bestätigte Range. Verworfen wird, wenn eine Seite nach dem Mergen nicht mehr
+    # ausreichend bestätigt ist ODER der Kurs zu oft außerhalb der Box geschlossen hat.
+    geprueft = []
+    for start_zeit, end_zeit, tief, hoch in verschmolzen:
+        ausschnitt = preisreihe.loc[start_zeit:end_zeit]
+        puffer = (hoch - tief) * 0.15
+        tage_nah_tief = (ausschnitt["Low"] <= tief + puffer).sum()
+        tage_nah_hoch = (ausschnitt["High"] >= hoch - puffer).sum()
+        ausserhalb_anteil = ((ausschnitt["Close"] < tief) | (ausschnitt["Close"] > hoch)).mean()
+        if tage_nah_tief >= min_treffer and tage_nah_hoch >= min_treffer and ausserhalb_anteil <= 0.20:
+            geprueft.append([start_zeit, end_zeit, tief, hoch])
+    verschmolzen = geprueft
+
+    # Bei mehr Kandidaten als angezeigt werden sollen: die am LÄNGSTEN andauernden
+    # Ranges behalten (längere Dauer typischerweise ist ein stärkeres Signal für
+    # eine "echte" Konsolidierung als eine kurze, zufällige Zwischenpause) statt
+    # einfach die chronologisch ersten zu nehmen.
+    verschmolzen.sort(key=lambda b: b[1] - b[0], reverse=True)
+    return [tuple(b) for b in verschmolzen[:segmente]]
 
 
 def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=15, min_treffer=2, top_n=3):
@@ -719,12 +906,33 @@ def finde_intraday_umkehrzonen(intraday_reihe, fenster=3, bucket_usd=15, min_tre
         if low.iloc[i] == fl.min():
             swing_lows.append(low.iloc[i])
 
+    # Einseitiger Rückwärts-Check für die letzten `fenster` Kerzen - gleicher Grund
+    # wie in analysiere_reaktionszonen: ohne das kann der AKTUELLE Kurs nie eine
+    # bestehende Umkehrzone bestätigen, selbst wenn er sie gerade jetzt erneut testet.
+    for i in range(max(fenster, n - fenster), n):
+        fh = high.iloc[max(0, i - fenster):i + 1]
+        if high.iloc[i] == fh.max():
+            swing_highs.append(high.iloc[i])
+        fl = low.iloc[max(0, i - fenster):i + 1]
+        if low.iloc[i] == fl.min():
+            swing_lows.append(low.iloc[i])
+
     def clustern(punkte):
-        buckets = {}
-        for p in punkte:
-            key = round(p / bucket_usd) * bucket_usd
-            buckets.setdefault(key, []).append(p)
-        zonen = [(sum(v) / len(v), len(v)) for v in buckets.values() if len(v) >= min_treffer]
+        # Toleranz-Kette statt starres Preis-Raster (siehe finde_range_box für den
+        # Hintergrund - gleicher Bug betraf auch diese Funktion) + Obergrenze für
+        # die Gesamtspanne eines Clusters, damit sich die Kette nicht durch eine
+        # choppy Phase hindurch "durchhangeln" kann (siehe analysiere_reaktionszonen).
+        if not punkte:
+            return []
+        max_spanne = bucket_usd * 2.5
+        punkte_sortiert = sorted(punkte)
+        cluster = [[punkte_sortiert[0]]]
+        for p in punkte_sortiert[1:]:
+            if p - cluster[-1][-1] <= bucket_usd and p - cluster[-1][0] <= max_spanne:
+                cluster[-1].append(p)
+            else:
+                cluster.append([p])
+        zonen = [(sum(c) / len(c), len(c)) for c in cluster if len(c) >= min_treffer]
         zonen.sort(key=lambda z: -z[1])
         return zonen[:top_n]
 
@@ -738,12 +946,26 @@ def finde_swing_punkte(reihe, fenster=3):
     zurück, chronologisch sortiert."""
     werte = reihe.to_numpy()
     zeiten = reihe.index
+    n = len(werte)
     hochs, tiefs = [], []
-    for i in range(fenster, len(werte) - fenster):
+    for i in range(fenster, n - fenster):
         ausschnitt = werte[i - fenster:i + fenster + 1]
         if werte[i] == ausschnitt.max() and werte[i] > werte[i - fenster] and werte[i] > werte[i + fenster]:
             hochs.append((zeiten[i], float(werte[i])))
         if werte[i] == ausschnitt.min() and werte[i] < werte[i - fenster] and werte[i] < werte[i + fenster]:
+            tiefs.append((zeiten[i], float(werte[i])))
+
+    # Einseitiger Rückwärts-Check für die letzten `fenster` Punkte - ohne den können
+    # die aktuellsten Tage NIE als Swing-Punkt zählen (ihnen fehlen die künftigen
+    # Bestätigungstage), selbst wenn genau dort gerade das extremste Tief/Hoch der
+    # ganzen Reihe liegt. Folge: die Kanal-Hüllkurve (siehe finde_trendkanal) konnte
+    # den aktuellen Rand gar nicht erreichen, obwohl sie ihn erreichen sollte - genau
+    # das wurde bemängelt ("untere Linie müsste unter dem letzten Tief liegen").
+    for i in range(max(fenster, n - fenster), n):
+        ausschnitt = werte[max(0, i - fenster):i + 1]
+        if werte[i] == ausschnitt.max():
+            hochs.append((zeiten[i], float(werte[i])))
+        if werte[i] == ausschnitt.min():
             tiefs.append((zeiten[i], float(werte[i])))
     return hochs, tiefs
 
@@ -765,8 +987,29 @@ def finde_trendkanal(intraday_reihe, fenster=3, min_punkte=2, flach_schwelle_pct
     x_tiefs = mdates.date2num([t for t, _ in tiefs])
     y_tiefs = np.array([v for _, v in tiefs])
 
-    steigung_oben, achse_oben = np.polyfit(x_hochs, y_hochs, 1)
-    steigung_unten, achse_unten = np.polyfit(x_tiefs, y_tiefs, 1)
+    # Neuere Swing-Punkte stärker gewichten als ältere (linear von 1 auf 3): eine
+    # unGEWICHTETE Regression durch alle Swing-Punkte lässt sich von einem einzelnen
+    # älteren, mittig liegenden Punkt zu stark dominieren - beobachtet an einem Fall,
+    # in dem ein Tief aus der Mitte der Teilreihe (nicht das aktuellste) die Steigung
+    # bestimmte und die Linie dadurch am rechten Rand weit unter die tatsächlich
+    # aktuellen Tiefs zog ("Linie müsste unter dem LETZTEN Tief liegen, nicht
+    # irgendwo weit darunter"). Mit Gewichtung zählt die jüngere Marktstruktur mehr.
+    gewichte_hochs = np.linspace(1, 3, len(x_hochs)) if len(x_hochs) > 2 else None
+    gewichte_tiefs = np.linspace(1, 3, len(x_tiefs)) if len(x_tiefs) > 2 else None
+    steigung_oben, achse_oben = np.polyfit(x_hochs, y_hochs, 1, w=gewichte_hochs)
+    steigung_unten, achse_unten = np.polyfit(x_tiefs, y_tiefs, 1, w=gewichte_tiefs)
+
+    # WICHTIG: die beiden Linien danach zu einer echten HÜLLKURVE verschieben, statt
+    # sie als reine Ausgleichsgerade (Regression) stehen zu lassen. Eine Regression
+    # minimiert nur die quadrierte Abweichung ALLER Punkte und kann dadurch locker
+    # UNTER einzelnen Hochs (bzw. ÜBER einzelnen Tiefs) verlaufen - genau das wurde
+    # bemängelt ("die obere Linie liegt unter den Hochs"). Ein Trader zeichnet eine
+    # Widerstandslinie aber so, dass sie die Hochs oben begrenzt (mind. den höchsten
+    # Punkt berührt), keine Ausgleichsgerade mittendurch. Deshalb: Steigung aus der
+    # Regression übernehmen (bestimmt weiterhin Trendrichtung/Formation), aber die
+    # Linie parallel so weit verschieben, bis sie den extremsten Punkt berührt.
+    achse_oben += float(np.max(y_hochs - (steigung_oben * x_hochs + achse_oben)))
+    achse_unten += float(np.min(y_tiefs - (steigung_unten * x_tiefs + achse_unten)))
 
     referenz_preis = float(intraday_reihe["Close"].iloc[-1])
     tage_gesamt = (intraday_reihe.index[-1] - intraday_reihe.index[0]).total_seconds() / 86400
@@ -808,6 +1051,89 @@ def finde_trendkanal(intraday_reihe, fenster=3, min_punkte=2, flach_schwelle_pct
     }
 
 
+def kanal_seit_wendepunkt(reihe, fenster=None, min_punkte=3, min_anteil=0.15, max_anteil=0.85):
+    """Ergänzt die übergeordnete Kanal-/Formationserkennung (die immer über den
+    GESAMTEN Chart-Zeitraum läuft) um eine zweite, kürzere Berechnung nur für die
+    Zeit SEIT dem letzten großen Hoch/Tief. Grund: ein Kanal über den gesamten
+    Zeitraum wird von einer langen vorangegangenen Bewegung (z.B. einem monatelangen
+    Aufwärtstrend) dominiert und bildet eine seitdem einsetzende, steilere Gegen-
+    bewegung nur gedämpft/verzögert ab - beobachtet an einem Fall, in dem der
+    Gesamtkanal einen 'Abwärtskanal' zeigte, der viel flacher war als die tatsächliche,
+    steile Bewegung seit dem Hoch.
+    Prüft BEIDE globalen Extrempunkte (höchstes Hoch UND tiefstes Tief) als
+    möglichen Wendepunkt - nicht nur den jüngeren der beiden: ein ganz frisches
+    Tief von vor wenigen Tagen liefert z.B. eine viel zu kurze, statistisch nicht
+    belastbare Teilreihe, obwohl das eigentlich relevante Hoch (der Start der
+    aktuellen Abwärtsbewegung) schon deutlich länger zurückliegt und eine sinnvolle
+    Länge ergäbe. Von den Kandidaten, deren Teilreihen-Länge zwischen min_anteil
+    und max_anteil der Gesamtlänge liegt, wird der mit dem KLEINEREN Anteil gewählt
+    (die fokussiertere, aktuellere Formation) - zu kurz ist nicht belastbar, zu lang
+    (nahe der Gesamtlänge) wäre nur eine Wiederholung des Gesamtkanals.
+    Gibt None zurück, wenn kein Kandidat passt, sonst ein Dict mit 'start'
+    (Zeitpunkt des Wendepunkts), 'reihe' (Teilreihe ab dort), 'typ' ('kanal' oder
+    'trend') und 'daten' (Kanal-Dict bzw. (steigung, achsenabschnitt))."""
+    if len(reihe) < 20:
+        return None
+    # WICHTIG: Wendepunkt anhand des SCHLUSSKURSES suchen, nicht anhand von High/Low
+    # (Tagesdochten) - der Chart zeichnet die Close-Linie, nicht High/Low. Ein
+    # einzelner Docht-Ausreißer (z.B. ein kurzes Hoch, das im Schlusskurs gar nicht
+    # nachvollziehbar ist) würde sonst als "der" Wendepunkt gewählt und die Zusatz-
+    # linie an einem Punkt starten lassen, den man in der sichtbaren Kurslinie gar
+    # nicht als Hoch/Tief erkennt - beobachtet an einem Fall, in dem ein Docht-Hoch
+    # vom 14.04. (High 4.252) den optisch klar erkennbaren Schlusskurs-Peak vom
+    # 05.05. (Close 4.243, dort aber nur High 4.248) als Wendepunkt verdrängte.
+    kandidaten_zeiten = sorted({reihe["Close"].idxmax(), reihe["Close"].idxmin()})
+    gueltige = []
+    for wendepunkt in kandidaten_zeiten:
+        sub = reihe.loc[wendepunkt:]
+        anteil = len(sub) / len(reihe)
+        if min_anteil <= anteil <= max_anteil:
+            gueltige.append((anteil, wendepunkt, sub))
+    if not gueltige:
+        return None
+    _, wendepunkt, sub = min(gueltige, key=lambda g: g[0])
+
+    eigenes_fenster = fenster or max(2, len(sub) // 12)
+    kanal = finde_trendkanal(sub, fenster=eigenes_fenster, min_punkte=min_punkte)
+    if kanal is not None:
+        return {"start": wendepunkt, "reihe": sub, "typ": "kanal", "daten": kanal}
+
+    x_num = mdates.date2num(sub.index)
+    steigung, achsenabschnitt = np.polyfit(x_num, sub["Close"].values, 1)
+    return {"start": wendepunkt, "reihe": sub, "typ": "trend", "daten": (steigung, achsenabschnitt)}
+
+
+def zeichne_kanal_seit_wendepunkt(ax, reihe, rechte_labels, farbe="#f0d060", zeitformat="%d.%m."):
+    """Zeichnet das Ergebnis von kanal_seit_wendepunkt() (falls vorhanden) als
+    gestrichelte, farblich abgesetzte Zusatzlinie(n) und reiht das Label in die
+    übergebene rechte_labels-Liste ein (Spalte A: aktueller Zustand)."""
+    info = kanal_seit_wendepunkt(reihe)
+    if info is None:
+        return
+    sub = info["reihe"]
+    x_num_rand = mdates.date2num([sub.index[0], sub.index[-1]])
+    praefix = f"Seit {sub.index[0].strftime(zeitformat)}: "
+    if info["typ"] == "kanal":
+        k = info["daten"]
+        steigung_oben, achse_oben = k["obere_linie"]
+        steigung_unten, achse_unten = k["untere_linie"]
+        y_oben = steigung_oben * x_num_rand + achse_oben
+        y_unten = steigung_unten * x_num_rand + achse_unten
+        ax.plot(sub.index[[0, -1]], y_oben, color=farbe, linewidth=1.4, linestyle="--", alpha=0.9, zorder=6)
+        ax.plot(sub.index[[0, -1]], y_unten, color=farbe, linewidth=1.4, linestyle="--", alpha=0.9, zorder=6)
+        label_y = max(y_oben[-1], y_unten[-1])
+        label_text = f"{praefix}{k['formation']}"
+    else:
+        steigung, achsenabschnitt = info["daten"]
+        y = steigung * x_num_rand + achsenabschnitt
+        ax.plot(sub.index[[0, -1]], y, color=farbe, linewidth=1.4, linestyle="--", alpha=0.9, zorder=6)
+        label_y = y[-1]
+        richtung = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
+        label_text = f"{praefix}{richtung}"
+    rechte_labels.append({"y": label_y, "text": f"  {label_text}", "color": farbe,
+                           "fontsize": 8.5, "fontweight": "bold", "style": "italic"})
+
+
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor("#14110d")
@@ -816,11 +1142,24 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     preise = intraday_reihe["Close"]
     ax.plot(intraday_reihe.index, preise, color="#e8b95c", linewidth=1.6)
 
+    # Zwei rechte Spalten wie bei Tages-/6M-Chart: Spalte A (nah am Chartende) für
+    # den aktuellen Zustand/Trade, Spalte B (weiter rechts versetzt) für strukturelle
+    # Zonen - siehe platziere_labels_kollisionsfrei.
+    rechte_labels = []      # Spalte A: Kanal/Zusatzkanal/Tageshoch-Tief/RA-Einstieg-Stop-TP
+    ferne_labels = []       # Spalte B: Widerstand/Support/Struktur/Umkehrzonen
+    gesamtspanne = intraday_reihe.index[-1] - intraday_reihe.index[0]
+    # Größerer Abstand als bei Tages-/6M-Chart (dort 0.30): die AKTUELL-Label hier
+    # enthalten oft lange Zeitstempel-Texte (z.B. "Seit 12.08. 15:00: Aufwärtstrend"),
+    # die bei der kurzen Intraday-Zeitspanne sonst optisch bis in die STRUKTUR-Spalte
+    # hineinragen und deren Label überlappen, obwohl beide korrekt an unterschiedlichen
+    # X-Positionen verankert sind - das lange Textlabel selbst reicht einfach zu weit.
+    x_spalte_b = intraday_reihe.index[-1] + gesamtspanne * 0.55
+
     # Trendkanal: zwei Linien durch Swing-Hochs/-Tiefs, klassifiziert als Kanal-
     # oder Dreieck-Formation (siehe finde_trendkanal). Nur wenn genug Swing-
     # Punkte für beide Linien gefunden wurden - sonst Fallback auf die
     # einfache Einzel-Trendlinie (lineare Regression über die letzte Hälfte).
-    kanal = finde_trendkanal(intraday_reihe)
+    kanal = finde_trendkanal(intraday_reihe, fenster=INTRADAY_KANAL_FENSTER, min_punkte=INTRADAY_KANAL_MIN_PUNKTE)
     kanal_werte_fuer_achse = []
     if kanal is not None:
         x_num_rand = mdates.date2num([intraday_reihe.index[0], intraday_reihe.index[-1]])
@@ -834,8 +1173,8 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
                  linestyle="-", alpha=0.85, zorder=5)
         ax.plot(intraday_reihe.index[[0, -1]], y_unten_linie, color="#5cb85c", linewidth=1.6,
                  linestyle="-", alpha=0.85, zorder=5)
-        ax.text(intraday_reihe.index[-1], max(y_oben_linie[-1], y_unten_linie[-1]), f"  {kanal['formation']}",
-                 color="#e8b95c", fontsize=10, fontweight="bold", va="bottom", ha="left")
+        rechte_labels.append({"y": max(y_oben_linie[-1], y_unten_linie[-1]), "text": f"  {kanal['formation']}",
+                               "color": "#e8b95c", "fontsize": 10, "fontweight": "bold"})
     else:
         # Trendlinie: einfache lineare Regression über die letzte Hälfte der Kursreihe
         # (aktuellerer Trend statt über den gesamten 2-Tage-Zeitraum gemittelt)
@@ -847,8 +1186,26 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
         trend_label = "Aufwärtstrend" if steigung > 0 else "Abwärtstrend"
         ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8,
                  linestyle="-", alpha=0.9, zorder=5)
-        ax.text(trend_ausschnitt.index[-1], trend_werte[-1], f"  {trend_label}", color=trend_farbe,
-                 fontsize=10, fontweight="bold", va="bottom" if steigung > 0 else "top", ha="left")
+        kanal_werte_fuer_achse += [trend_werte[0], trend_werte[-1]]
+        rechte_labels.append({"y": trend_werte[-1], "text": f"  {trend_label}", "color": trend_farbe,
+                               "fontsize": 10, "fontweight": "bold"})
+
+    # Zusatzkanal "seit dem letzten großen Hoch/Tief" (siehe kanal_seit_wendepunkt) -
+    # dessen Linien vorab einmal berechnen (nicht zeichnen), um ihre Werte in die
+    # Achsen-Erweiterung mit einzubeziehen - baue_chart setzt die Y-Achse weiter
+    # unten manuell fest (anders als Tages-/6M-Chart, die sich auf Matplotlibs
+    # Autoscale verlassen), ohne diesen Schritt würde der Zusatzkanal ggf. abgeschnitten.
+    zusatzkanal_info = kanal_seit_wendepunkt(intraday_reihe) if len(intraday_reihe) >= INTRADAY_ZUSATZKANAL_MIN_LAENGE else None
+    if zusatzkanal_info is not None:
+        sub = zusatzkanal_info["reihe"]
+        x_num_rand_sub = mdates.date2num([sub.index[0], sub.index[-1]])
+        if zusatzkanal_info["typ"] == "kanal":
+            k = zusatzkanal_info["daten"]
+            so, ao = k["obere_linie"]; su, au = k["untere_linie"]
+            kanal_werte_fuer_achse += list(so * x_num_rand_sub + ao) + list(su * x_num_rand_sub + au)
+        else:
+            steigung, achsenabschnitt = zusatzkanal_info["daten"]
+            kanal_werte_fuer_achse += list(steigung * x_num_rand_sub + achsenabschnitt)
 
     # Umkehrzonen vorab berechnen (wird weiter unten auch fürs Zeichnen genutzt), damit
     # die Range-Box nur gezeigt wird, wenn sie sich mit einer Umkehrzone deckt - sonst
@@ -862,7 +1219,8 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     # Range-Box: Widerstand + Support, die beide mehrfach berührt wurden (Swing-Hochs/
     # -Tiefs in 20-Min-Fenstern, min. 2 Berührungen je Seite) - anders als die reine
     # Spannen-Prüfung erkennt das auch Tage mit echtem Pendeln zwischen zwei Levels.
-    range_box = finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2)
+    range_box = finde_range_box(intraday_reihe, fenster=INTRADAY_RANGE_FENSTER,
+                                  bucket_usd=INTRADAY_RANGE_BUCKET_USD, min_treffer=2)
     box_bereich = None
     if range_box:
         start_zeit, end_zeit, tief, hoch = range_box
@@ -871,12 +1229,17 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
             box_bereich = (tief, hoch)
             x_start = mdates.date2num(start_zeit)
             x_end = mdates.date2num(end_zeit)
-            ax.add_patch(Rectangle(
-                (x_start, tief), x_end - x_start, hoch - tief,
-                linewidth=1.5, edgecolor="#e8e0c8", facecolor="none", alpha=0.85, zorder=4,
-            ))
-            ax.text(start_zeit, hoch, "Range  ", color="#e8e0c8", fontsize=8.5,
-                     style="italic", va="bottom", ha="right")
+            referenz_spanne = float(intraday_reihe["High"].max() - intraday_reihe["Low"].min())
+            hoch_sichtbar = zeichne_range_box(ax, x_start, x_end, tief, hoch, referenz_spanne)
+            # Nah am rechten Rand: Label in Spalte B einreihen statt separat zu zeichnen
+            # (sonst Kollisionsrisiko mit den anderen rechten Labels - siehe gleiche
+            # Logik im Tages-/6M-Chart).
+            if (intraday_reihe.index[-1] - end_zeit) < gesamtspanne * 0.15:
+                ferne_labels.append({"y": hoch_sichtbar, "text": "Range", "color": "#e8e0c8",
+                                      "fontsize": 8.5, "style": "italic"})
+            else:
+                ax.text(start_zeit, hoch_sichtbar, "Range  ", color="#e8e0c8", fontsize=8.5,
+                         style="italic", va="bottom", ha="right")
 
     # Basis-Range: Kursbereich + Puffer
     puffer = (preise.max() - preise.min()) * 0.15
@@ -921,21 +1284,21 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
 
     if naechster_r_typ == "pivot":
         ax.axhline(naechster_r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
-        ax.text(intraday_reihe.index[-1], naechster_r, f" Widerstand {naechster_r:,.0f}", color="#e8887a",
-                 fontsize=9.5, fontweight="bold", va="center", ha="left")
+        ferne_labels.append({"y": naechster_r, "text": f"Widerstand {naechster_r:,.0f}".replace(",", "."),
+                              "color": "#e8887a", "fontsize": 9.5, "fontweight": "bold"})
     elif naechster_r_typ == "struktur":
         ax.axhline(naechster_r, color="#b5654f", linewidth=1.3, linestyle=":", alpha=0.6)
-        ax.text(intraday_reihe.index[-1], naechster_r, f" Struktur-Widerstand {naechster_r:,.0f}",
-                 color="#e8887a", fontsize=8.5, style="italic", va="center", ha="left")
+        ferne_labels.append({"y": naechster_r, "text": f"Struktur-Widerstand {naechster_r:,.0f}".replace(",", "."),
+                              "color": "#e8887a", "fontsize": 8.5, "style": "italic"})
 
     if naechster_s_typ == "pivot":
         ax.axhline(naechster_s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
-        ax.text(intraday_reihe.index[-1], naechster_s, f" Support {naechster_s:,.0f}", color="#9fcf8f",
-                 fontsize=9.5, fontweight="bold", va="center", ha="left")
+        ferne_labels.append({"y": naechster_s, "text": f"Support {naechster_s:,.0f}".replace(",", "."),
+                              "color": "#9fcf8f", "fontsize": 9.5, "fontweight": "bold"})
     elif naechster_s_typ == "struktur":
         ax.axhline(naechster_s, color="#7fae6f", linewidth=1.3, linestyle=":", alpha=0.6)
-        ax.text(intraday_reihe.index[-1], naechster_s, f" Struktur-Support {naechster_s:,.0f}",
-                 color="#9fcf8f", fontsize=8.5, style="italic", va="center", ha="left")
+        ferne_labels.append({"y": naechster_s, "text": f"Struktur-Support {naechster_s:,.0f}".replace(",", "."),
+                              "color": "#9fcf8f", "fontsize": 8.5, "style": "italic"})
 
     # Pivot- und Struktur-Level, die zufällig auch noch in die (dadurch minimal
     # erweiterte) Achse passen, zusätzlich einzeichnen - aber nichts zieht die
@@ -943,24 +1306,23 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     for r in pivots["r"]:
         if r != naechster_r and y_unten <= r <= y_oben:
             ax.axhline(r, color="#b5654f", linewidth=1.1, linestyle="--", alpha=0.85)
-            ax.text(intraday_reihe.index[-1], r, f" Widerstand {r:,.0f}", color="#e8887a",
-                     fontsize=9.5, fontweight="bold", va="center", ha="left")
+            ferne_labels.append({"y": r, "text": f"Widerstand {r:,.0f}".replace(",", "."),
+                                  "color": "#e8887a", "fontsize": 9.5, "fontweight": "bold"})
     for s in pivots["s"]:
         if s != naechster_s and y_unten <= s <= y_oben:
             ax.axhline(s, color="#7fae6f", linewidth=1.1, linestyle="--", alpha=0.85)
-            ax.text(intraday_reihe.index[-1], s, f" Support {s:,.0f}", color="#9fcf8f",
-                     fontsize=9.5, fontweight="bold", va="center", ha="left")
+            ferne_labels.append({"y": s, "text": f"Support {s:,.0f}".replace(",", "."),
+                                  "color": "#9fcf8f", "fontsize": 9.5, "fontweight": "bold"})
 
     # Tatsächliches Intraday-Hoch/-Tief zusätzlich als schlichte Referenzlinien -
     # ergänzt die rechnerischen Pivot-Level um die real erreichten Extrempunkte.
+    # Spalte A (aktueller Zustand), konsistent mit Einstieg/Stop im Tageschart.
     intraday_hoch = preise.max()
     intraday_tief = preise.min()
     ax.axhline(intraday_hoch, color="#c9c2b0", linewidth=0.9, linestyle=":", alpha=0.7)
-    ax.text(intraday_reihe.index[0], intraday_hoch, "Tageshoch  ", color="#c9c2b0",
-             fontsize=8.5, va="bottom", ha="left")
+    rechte_labels.append({"y": intraday_hoch, "text": "  Tageshoch", "color": "#c9c2b0", "fontsize": 8.5})
     ax.axhline(intraday_tief, color="#c9c2b0", linewidth=0.9, linestyle=":", alpha=0.7)
-    ax.text(intraday_reihe.index[0], intraday_tief, "Tagestief  ", color="#c9c2b0",
-             fontsize=8.5, va="top", ha="left")
+    rechte_labels.append({"y": intraday_tief, "text": "  Tagestief", "color": "#c9c2b0", "fontsize": 8.5})
 
     # Umkehrzonen zeichnen: sichtbares 15-USD-Band mit klarer Mittellinie.
     # Die Umkehrzonen-Erkennung selbst bleibt unverändert. Der bestätigte
@@ -980,9 +1342,8 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
         ax.axhline(zone_oben, color="#6fa8dc", linewidth=0.8, linestyle="-", alpha=0.45, zorder=5)
         # Klare Mittellinie innerhalb des 15-USD-Buckets
         ax.axhline(preis, color="#6fa8dc", linewidth=1.8, linestyle="-", alpha=1.0, zorder=7)
-        ax.text(intraday_reihe.index[-1], preis,
-                f"  Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
-                color="#6fa8dc", fontsize=7.5, va="bottom", ha="right", zorder=7)
+        ferne_labels.append({"y": preis, "text": f"Umkehrzone {preis:,.0f} ({treffer}x)".replace(",", "."),
+                              "color": "#6fa8dc", "fontsize": 7.5})
 
     for preis, treffer in umkehrzonen["widerstandszonen"]:
         if y_unten <= preis <= y_oben and not in_box(preis):
@@ -993,25 +1354,30 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
             zeichne_umkehrzone(preis, treffer)
 
     ax.set_ylim(y_unten, y_oben)
-    ax.margins(x=0.08)  # Platz rechts für die Level-Beschriftungen
+    ax.margins(x=0.14)
+
+    # Zusatzkanal jetzt tatsächlich zeichnen (Werte wurden oben schon für die
+    # Achsen-Erweiterung berücksichtigt) - Label landet automatisch in Spalte A.
+    if len(intraday_reihe) >= INTRADAY_ZUSATZKANAL_MIN_LAENGE:
+        zeichne_kanal_seit_wendepunkt(ax, intraday_reihe, rechte_labels, zeitformat="%d.%m. %H:%M")
 
     # Range-Ausbruch-Signal (1h): Einstieg/Stop/TP1/TP2 einzeichnen, falls offen -
     # "RA-"-Präfix in der Beschriftung, damit es nicht mit den Pivot-Widerstand/
-    # Support-Linien verwechselt wird, die dieselbe Farbpalette nutzen.
+    # Support-Linien verwechselt wird, die dieselbe Farbpalette nutzen. Spalte A
+    # (aktueller Zustand/Trade), konsistent mit Einstieg/Stop im Tageschart.
     if range_ausbruch_status and range_ausbruch_status.get("status") == "offen":
         ra = range_ausbruch_status
         ax.axhline(ra["einstieg"], color="#c9c2b0", linewidth=1.0, linestyle=":", alpha=0.8)
-        ax.text(intraday_reihe.index[0], ra["einstieg"], "RA-Einstieg  ", color="#c9c2b0",
-                 fontsize=8, va="bottom", ha="right")
+        rechte_labels.append({"y": ra["einstieg"], "text": "  RA-Einstieg", "color": "#c9c2b0", "fontsize": 8})
         ax.axhline(ra["stop"], color="#d9534f", linewidth=1.2, linestyle="--", alpha=0.85)
-        ax.text(intraday_reihe.index[0], ra["stop"], f"RA-Stop {ra['stop']:,.0f}  ".replace(",", "."),
-                 color="#e8887a", fontsize=8, fontweight="bold", va="center", ha="right")
+        rechte_labels.append({"y": ra["stop"], "text": f"  RA-Stop {ra['stop']:,.0f}".replace(",", "."),
+                               "color": "#e8887a", "fontsize": 8, "fontweight": "bold"})
         ax.axhline(ra["tp1"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.7)
-        ax.text(intraday_reihe.index[0], ra["tp1"], f"RA-TP1 {ra['tp1']:,.0f}  ".replace(",", "."),
-                 color="#9fcf8f", fontsize=7.5, va="center", ha="right")
+        rechte_labels.append({"y": ra["tp1"], "text": f"  RA-TP1 {ra['tp1']:,.0f}".replace(",", "."),
+                               "color": "#9fcf8f", "fontsize": 7.5})
         ax.axhline(ra["tp2"], color="#5cb85c", linewidth=1.0, linestyle="--", alpha=0.5)
-        ax.text(intraday_reihe.index[0], ra["tp2"], f"RA-TP2 {ra['tp2']:,.0f}  ".replace(",", "."),
-                 color="#9fcf8f", fontsize=7.5, va="center", ha="right")
+        rechte_labels.append({"y": ra["tp2"], "text": f"  RA-TP2 {ra['tp2']:,.0f}".replace(",", "."),
+                               "color": "#9fcf8f", "fontsize": 7.5})
 
     # Feineres Gitter: Hauptlinien + gedämpfte Zwischenlinien für bessere Ablesbarkeit
     spanne = y_oben - y_unten
@@ -1027,7 +1393,19 @@ def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status
     ax.set_ylabel("USD", color="#a89d87", fontsize=10)
 
     fig.tight_layout()
-    fig.savefig(pfad, facecolor=fig.get_facecolor())
+    # Erst jetzt, nachdem die endgültigen Achsengrenzen feststehen, die gesammelten
+    # Label kollisionsfrei setzen (siehe platziere_labels_kollisionsfrei) - Spalte A
+    # (aktueller Zustand/Trade) nah am Chart, Spalte B (Widerstand/Support/Umkehr-
+    # zonen) versetzt weiter rechts, mit kleiner Kopfzeile zur Orientierung.
+    if rechte_labels:
+        ax.text(intraday_reihe.index[-1], ax.get_ylim()[1], "AKTUELL", color="#6b6354", fontsize=7,
+                 fontweight="bold", va="bottom", ha="left")
+    if ferne_labels:
+        ax.text(x_spalte_b, ax.get_ylim()[1], "STRUKTUR", color="#6b6354", fontsize=7,
+                 fontweight="bold", va="bottom", ha="left")
+    platziere_labels_kollisionsfrei(ax, intraday_reihe.index[-1], rechte_labels, ha="left")
+    platziere_labels_kollisionsfrei(ax, x_spalte_b, ferne_labels, ha="left")
+    fig.savefig(pfad, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
     return pfad
 
@@ -1138,7 +1516,7 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     rechte_labels = []      # Spalte A: Kanal/Trend/Swing-Tief/Einstieg/Stop/TP
     ferne_labels = []       # Spalte B: strukturelle Zonen + ggf. Range am rechten Rand
     gesamtspanne_tage = (daily.index[-1] - daily.index[0]).days or 1
-    x_spalte_b = daily.index[-1] + pd.Timedelta(days=int(gesamtspanne_tage * 0.30))
+    x_spalte_b = daily.index[-1] + pd.Timedelta(days=int(gesamtspanne_tage * 0.40))
 
     # NEU: eigener Trendkanal + Formationserkennung (Swing-Hochs/-Tiefs über die
     # gesamte dargestellte Historie, eigene Parameter TAGESCHART_KANAL_*, unabhängig
@@ -1158,6 +1536,11 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
                  linestyle="-", alpha=0.75, zorder=4)
         rechte_labels.append({"y": max(y_oben_linie[-1], y_unten_linie[-1]), "text": f"  {tages_kanal['formation']}",
                                "color": "#e8b95c", "fontsize": 9.5, "fontweight": "bold"})
+
+    # NEU: zusätzlicher, kürzerer Kanal seit dem letzten großen Hoch/Tief - siehe
+    # kanal_seit_wendepunkt() für den Hintergrund (Gesamtkanal kann eine seither
+    # eingesetzte, steilere Gegenbewegung nur gedämpft abbilden).
+    zeichne_kanal_seit_wendepunkt(ax, daily, rechte_labels)
 
     # NEU: Range-Boxen (mehrfach berührte Support-/Widerstandslevel innerhalb eines
     # Zeitabschnitts), eigene Parameter TAGESCHART_RANGE_*.
@@ -1209,7 +1592,11 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     x_num = mdates.date2num(trend_ausschnitt.index)
     steigung, achsenabschnitt = np.polyfit(x_num, trend_ausschnitt.values, 1)
     trend_werte = steigung * x_num + achsenabschnitt
-    trend_farbe = "#5cb85c" if steigung > 0 else "#d9534f"
+    # Eigene, von Kanal (rot/grün) und Zusatzkanal (gelb) klar unterscheidbare Farbe -
+    # vorher nutzte diese Linie dieselben rot/grün-Töne wie die Aufwärtskanal-Ränder,
+    # wodurch das kurze 50T-Segment wie ein loses, abgerissenes Stück der viel
+    # längeren Kanallinie wirkte ("komisch kurz") statt als eigenständige Linie erkennbar zu sein.
+    trend_farbe = "#c9a0dc"
     trend_label = "Aufwärtstrend (50T)" if steigung > 0 else "Abwärtstrend (50T)"
     ax.plot(trend_ausschnitt.index, trend_werte, color=trend_farbe, linewidth=1.8, zorder=5)
     rechte_labels.append({"y": trend_werte[-1], "text": f"  {trend_label}", "color": trend_farbe,
@@ -1279,7 +1666,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     rechte_labels = []      # Spalte A: Kanal-/Trendformation (aktueller Zustand)
     ferne_labels = []       # Spalte B: alle strukturellen Zonen (6M-Struktur + bestehende Reaktionszonen)
     gesamtspanne_tage = (daily.index[-1] - daily.index[0]).days or 1
-    x_spalte_b = daily.index[-1] + pd.Timedelta(days=int(gesamtspanne_tage * 0.30))
+    x_spalte_b = daily.index[-1] + pd.Timedelta(days=int(gesamtspanne_tage * 0.40))
 
     # Übergeordneter Trendkanal + Formationserkennung - gleiche Methode wie im
     # Tageschart (finde_trendkanal), aber mit größeren Swing-Parametern
@@ -1313,6 +1700,10 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
                  linestyle="-", alpha=0.9, zorder=5)
         rechte_labels.append({"y": trend_werte[-1], "text": f"  {trend_label}", "color": trend_farbe,
                                "fontsize": 10, "fontweight": "bold"})
+
+    # NEU: zusätzlicher, kürzerer Kanal seit dem letzten großen Hoch/Tief - siehe
+    # kanal_seit_wendepunkt() für den Hintergrund.
+    zeichne_kanal_seit_wendepunkt(ax, daily, rechte_labels)
 
     # Range-Boxen: gleiche Berührungs-basierte Erkennung wie im Tageschart, aber mit
     # größeren Struktur-Parametern (LANGFRIST_RANGE_*) - über 6 Monate kann es
