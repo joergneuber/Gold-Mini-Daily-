@@ -1859,11 +1859,12 @@ def formatiere_crv(status, fmt):
 def formatiere_vorschau(status, fmt):
     """Vorschau auf Stop/Einstieg/TP1/TP2/CRV, wenn AKTUELL keine Position
     offen ist - beantwortet 'wie sähe ein Trade aus, falls das System gleich
-    triggert'. Der Stop (bzw. bei Range-Ausbruch auch der Einstieg) ist ein
-    exakter, schon jetzt bekannter Wert; bei V1e ist der Einstieg selbst nur
-    eine Näherung auf Basis des aktuellen Kurses, weil der echte Trigger
-    einen Bounce mit vorher unbekanntem Schlusskurs braucht (siehe
-    einstieg_praezise-Flag)."""
+    triggert'. Der Stop bzw. beim Range-Ausbruch der aktuell berechnete System-Einstieg ist
+    bereits als konkreter Wert bekannt; ausgelöst wird der Range-Einstieg aber
+    erst nach einem bestätigten 1h-Schlusskurs über der Breakout-Schwelle.
+    Bei V1e ist der Einstieg nur eine Näherung auf Basis des aktuellen Kurses,
+    weil der echte Trigger einen Bounce mit vorher unbekanntem Schlusskurs
+    braucht (siehe einstieg_praezise-Flag)."""
     vorschau = status.get("vorschau")
     if not vorschau:
         return None
@@ -1873,7 +1874,7 @@ def formatiere_vorschau(status, fmt):
     crv1 = (vorschau["tp1"] - vorschau["hypothetischer_einstieg"]) / risiko
     crv2 = (vorschau["tp2"] - vorschau["hypothetischer_einstieg"]) / risiko
     if vorschau.get("einstieg_praezise"):
-        einstieg_label = f"{fmt(vorschau['hypothetischer_einstieg'])} USD (exakter künftiger Trigger, kein Näherungswert)"
+        einstieg_label = (f"{fmt(vorschau['hypothetischer_einstieg'])} USD (aktueller System-Einstieg; Auslösung erst nach bestätigtem 1h-Schlusskurs über der Breakout-Schwelle)")
     else:
         einstieg_label = (
             f"nahe {fmt(vorschau['hypothetischer_einstieg'])} USD (Näherung auf Basis des aktuellen Kurses - "
