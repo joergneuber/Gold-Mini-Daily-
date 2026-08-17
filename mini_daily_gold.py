@@ -1575,13 +1575,16 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     tages_zonen = zonen_naechste_filter(tages_zonen_roh, referenz_preis=float(schluss.iloc[-1]),
                                           min_abstand_usd=TAGESCHART_ZONEN_MIN_ABSTAND_USD,
                                           top_n=TAGESCHART_ZONEN_TOP_N)
+    aktueller_kurs_tages = float(schluss.iloc[-1])
     for preis, treffer in tages_zonen["widerstandszonen"]:
         ax.axhline(preis, color="#8a5245", linewidth=0.9, linestyle=":", alpha=0.65, zorder=2)
-        ferne_labels.append({"y": preis, "text": f"Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+        bezeichnung = "Support" if preis < aktueller_kurs_tages else "Widerstand"
+        ferne_labels.append({"y": preis, "text": f"{bezeichnung} {preis:,.0f} ({treffer}x)".replace(",", "."),
                               "color": "#c98f7f", "fontsize": 7.5})
     for preis, treffer in tages_zonen["supportzonen"]:
         ax.axhline(preis, color="#4f6f47", linewidth=0.9, linestyle=":", alpha=0.65, zorder=2)
-        ferne_labels.append({"y": preis, "text": f"Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+        bezeichnung = "Support" if preis < aktueller_kurs_tages else "Widerstand"
+        ferne_labels.append({"y": preis, "text": f"{bezeichnung} {preis:,.0f} ({treffer}x)".replace(",", "."),
                               "color": "#9fcf8f", "fontsize": 7.5})
 
     # 50-Tage-Trend (gleiche Methode wie im Positionstrading-Signal) über den
@@ -1732,13 +1735,16 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     lang_struktur_zonen = zonen_naechste_filter(lang_struktur_zonen_roh, referenz_preis=float(schluss.iloc[-1]),
                                                   min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
                                                   top_n=LANGFRIST_ZONEN_TOP_N)
+    aktueller_kurs_lang = float(schluss.iloc[-1])
     for preis, treffer in lang_struktur_zonen["widerstandszonen"]:
         ax.axhline(preis, color="#8a5245", linewidth=1.0, linestyle="-.", alpha=0.6, zorder=2)
-        ferne_labels.append({"y": preis, "text": f"6M-Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+        bezeichnung = "6M-Support" if preis < aktueller_kurs_lang else "6M-Widerstand"
+        ferne_labels.append({"y": preis, "text": f"{bezeichnung} {preis:,.0f} ({treffer}x)".replace(",", "."),
                               "color": "#c98f7f", "fontsize": 7.5})
     for preis, treffer in lang_struktur_zonen["supportzonen"]:
         ax.axhline(preis, color="#4f6f47", linewidth=1.0, linestyle="-.", alpha=0.6, zorder=2)
-        ferne_labels.append({"y": preis, "text": f"6M-Struktur {preis:,.0f} ({treffer}x)".replace(",", "."),
+        bezeichnung = "6M-Support" if preis < aktueller_kurs_lang else "6M-Widerstand"
+        ferne_labels.append({"y": preis, "text": f"{bezeichnung} {preis:,.0f} ({treffer}x)".replace(",", "."),
                               "color": "#9fcf8f", "fontsize": 7.5})
 
     # Bestehende Reaktionszonen (3M/6M/36M-Vergleich aus main()) - Spalte B, im
