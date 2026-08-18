@@ -2921,7 +2921,7 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, daily_lang, daily_fuer_tageschart, kombinierte_zonen_lang)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, daily_lang, daily_fuer_tageschart, zonen_je_zeitraum.get(LANGFRIST_MONATE))
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
