@@ -2250,14 +2250,16 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
             return [], []
         return z.get("widerstandszonen", []), z.get("supportzonen", [])
 
-    # Keine breite historische Abfrage mehr: 36 Monate erzeugt für Gold
-    # teilweise für die aktuelle Analyse ungeeignete Extremzonen.
+    # Mittelfristig: 6M-Strukturebene
     mittel_w, mittel_s = struktur_preise(LANGFRIST_MONATE)
 
-    # Langfristig nutzt bevorzugt die Positionstrading-/Tageschart-Ebene.
-    # Falls diese nicht vorhanden ist, wird die mittelfristige Struktur als
-    # konservativer Fallback verwendet.
-    lang_w, lang_s = struktur_preise(12)
+    # Langfristig: eigene langfristige Strukturebene.
+    # Nicht dieselbe Quelle wie mittelfristig verwenden.
+    # Die Zonen werden aus dem bereits berechneten 36M-Bereich genommen.
+    lang_w, lang_s = struktur_preise(36)
+
+    # Falls die langfristige Ebene nicht verfügbar ist, bleibt der Report
+    # funktionsfähig und nutzt die mittelfristige Ebene als Notfall-Fallback.
     if not lang_w and not lang_s:
         lang_w, lang_s = mittel_w, mittel_s
 
