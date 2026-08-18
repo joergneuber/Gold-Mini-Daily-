@@ -639,7 +639,7 @@ Intraday-Daten (kurzfristig):
 - Vortages-Tief: {daten['prev_low']:.2f} USD
 - Intraday-Hoch (aktueller Zeitraum): {daten['intraday_reihe']['Close'].max():.2f} USD
 - Intraday-Tief (aktueller Zeitraum): {daten['intraday_reihe']['Close'].min():.2f} USD
-- Vorbörsliche Tendenz: {tendenz}
+- Tendenz zum Vortagesschluss: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
@@ -681,89 +681,19 @@ Abwärts-Trigger aus den oben vorgegebenen Szenario-Marken kurzfristig wahrschei
 zuerst erreicht wird) - diese zwei Sätze zählen mit zum 6-7-Sätze-Rahmen, sind kein
 zusätzlicher Absatz."""
 
-    # Gemini-Fallback: bei temporaeren API-/Ueberlastungsfehlern werden
-    # mehrere verfuegbare Modelle nacheinander versucht. Pro Modell maximal
-    # zwei Versuche mit exponentiellem Backoff.
-    #
-    # Reihenfolge:
-    # 1. Gemini 3.5 Flash
-    # 2. Gemini 3.1 Flash-Lite
-    # 3. Gemini 2.5 Flash
-    #
-    # Die Modellnamen entsprechen den aktuell von Google dokumentierten
-    # Gemini-API-Endpunkten.
-    modelle = [
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-2.5-flash",
-    ]
-
-    def ist_temporaerer_gemini_fehler(exc):
-        text = str(exc).lower()
-        status = getattr(exc, "status_code", None)
-        return (
-            status in (429, 500, 502, 503, 504)
-            or any(code in text for code in (
-                "429", "500", "502", "503", "504",
-                "unavailable", "resource exhausted",
-                "temporarily unavailable", "service unavailable",
-                "deadline exceeded", "internal server error",
-            ))
-        )
-
+    # Kurzer Retry: Gemini antwortet gelegentlich mit 503 (kurzzeitig überlastet,
+    # siehe Log 05.08.2026, 18:46 Uhr) - ein einzelner überlasteter Moment soll
+    # nicht gleich den ganzen Rückblick-Absatz leer lassen.
     letzter_fehler = None
-    fehler_pro_modell = []
-
-    for modell in modelle:
-        for versuch in range(1, 3):
-            try:
-                print(
-                    f"Gemini-Rueckblick: Modell {modell} "
-                    f"(Versuch {versuch}/2)"
-                )
-                antwort = client.models.generate_content(
-                    model=modell,
-                    contents=prompt,
-                )
-                text = (antwort.text or "").strip()
-                if text:
-                    print(f"Gemini-Rueckblick erfolgreich mit {modell}.")
-                    return text
-
-                letzter_fehler = RuntimeError(
-                    f"Gemini-Modell {modell} lieferte eine leere Antwort."
-                )
-                fehler_pro_modell.append(f"{modell}: leere Antwort")
-                break
-
-            except Exception as exc:
-                letzter_fehler = exc
-                fehler_pro_modell.append(f"{modell}: {exc}")
-
-                if not ist_temporaerer_gemini_fehler(exc):
-                    print(
-                        f"Gemini-Rueckblick: permanenter Fehler bei {modell}: {exc}"
-                    )
-                    break
-
-                if versuch < 2:
-                    wartezeit = 10 * (2 ** (versuch - 1))
-                    print(
-                        f"Gemini-Rueckblick: temporaerer Fehler bei {modell}; "
-                        f"erneuter Versuch in {wartezeit}s."
-                    )
-                    time.sleep(wartezeit)
-                else:
-                    print(
-                        f"Gemini-Rueckblick: {modell} nach 2 Versuchen nicht "
-                        f"verfuegbar; wechsle zum naechsten Modell."
-                    )
-
-    details = " | ".join(fehler_pro_modell[-6:])
-    return (
-        "(Rückblick-Generierung fehlgeschlagen: alle Gemini-Modelle nicht verfügbar. "
-        f"Letzte Fehler: {details or letzter_fehler})"
-    )
+    for versuch in range(1, 3):
+        try:
+            antwort = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+            return antwort.text.strip()
+        except Exception as exc:
+            letzter_fehler = exc
+            if versuch < 2:
+                time.sleep(15)
+    return f"(Rückblick-Generierung fehlgeschlagen nach 2 Versuchen: {letzter_fehler})"
 
 
 def finde_range_box(intraday_reihe, fenster=4, bucket_usd=6, min_treffer=2):
@@ -2131,7 +2061,7 @@ MINI DAILY: GOLD
 {warnzeile}
 {economic_events_block}
 
-VORBOERSLICHE TENDENZ
+TENDENZ
 {tendenz_label} ({tendenz_pct:+.2f}%)
 
 SZENARIEN
