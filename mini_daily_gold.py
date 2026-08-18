@@ -2905,6 +2905,26 @@ def main():
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday,
                              range_ausbruch_status=range_ausbruch_status)
     chart_lang_pfad = None
+    # Exakt dieselben 6M-Strukturzonen wie im sichtbaren 6M-Chart vorbereiten.
+    # Diese Quelle wird anschließend auch für die mittelfristige Szenario-Karte
+    # verwendet. Dadurch können Szenario-Marken nicht mehr aus den separaten
+    # 3M/6M-Reaktionszonen stammen (z.B. 4.786 statt der sichtbaren 4.442).
+    struktur_6m_szenario_zonen = None
+    if daily_lang is not None and len(daily_lang) > 0:
+        struktur_6m_zonen_roh = analysiere_reaktionszonen(
+            daily_lang,
+            fenster=LANGFRIST_ZONEN_FENSTER,
+            bucket_usd=LANGFRIST_ZONEN_BUCKET_USD,
+            min_treffer=LANGFRIST_ZONEN_MIN_TREFFER,
+            top_n=LANGFRIST_ZONEN_TOP_N * 3,
+        )
+        struktur_6m_szenario_zonen = zonen_naechste_filter(
+            struktur_6m_zonen_roh,
+            referenz_preis=float(daily_lang["Close"].iloc[-1]),
+            min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
+            top_n=LANGFRIST_ZONEN_TOP_N,
+        )
+
     if daily_lang is not None:
         chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
 
@@ -2921,7 +2941,12 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, daily_lang, daily_fuer_tageschart, zonen_je_zeitraum.get(LANGFRIST_MONATE))
+    html = baue_html(
+        daten, pivots, tendenz_label, tendenz_pct, rueckblick_text,
+        chart_pfad, chart_tages_pfad, positionstrading_status,
+        range_ausbruch_status, economic_events_block, zonen_je_zeitraum,
+        daily_lang, daily_fuer_tageschart, struktur_6m_szenario_zonen
+    )
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
