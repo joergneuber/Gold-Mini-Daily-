@@ -2171,7 +2171,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, positionstrading_daten=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2234,6 +2234,58 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         ziel = f" → Ziel {fmt(szenarien['ziel_baerisch'])} USD" if szenarien["ziel_baerisch"] is not None else ""
         szenarien_html += szenario_balken("#d9534f", "BÄRISCH", "#f0a49f", "#2e1414", "#a13f3a",
                                            f"unter {fmt(szenarien['naechster_support'])} USD", ziel)
+
+
+    # Neues Layout: 3 Zeithorizonte. Die kurzfristige Logik bleibt unverändert
+    # und wird aus dem bestehenden Szenarien-Block übernommen.
+    kurzfristig_html = szenarien_html
+
+    # Dynamische Struktur-Szenarien aus vorhandenen Analyseebenen.
+    def struktur_preise(zeitraum):
+        z = zonen_je_zeitraum.get(zeitraum) if zonen_je_zeitraum else None
+        if not z:
+            return [], []
+        return z.get("widerstandszonen", []), z.get("supportzonen", [])
+
+    mittel_w, mittel_s = struktur_preise(LANGFRIST_MONATE)
+    lang_w, lang_s = struktur_preise(36)
+
+    mittel_wert = f"{mittel_w[0][0]:,.0f}".replace(",", ".") if mittel_w else "keine Zone"
+    mittel_s_wert = f"{mittel_s[0][0]:,.0f}".replace(",", ".") if mittel_s else "keine Zone"
+    lang_wert = f"{lang_w[0][0]:,.0f}".replace(",", ".") if lang_w else "keine Zone"
+    lang_s_wert = f"{lang_s[0][0]:,.0f}".replace(",", ".") if lang_s else "keine Zone"
+
+    mittelfristig_html = f"""
+    <p style="background:#132a16;border-left:4px solid #3f8f4a;padding:8px 12px;margin:4px 0;">🟢 <strong style="color:#9fe39f;">BULLISCH</strong><br>über Strukturwiderstand {mittel_wert}<br>Ausbruch bestätigt</p>
+    <p style="background:#2e2612;border-left:4px solid #a67f2e;padding:8px 12px;margin:4px 0;">🟡 <strong style="color:#f0d495;">NEUTRAL</strong><br>zwischen Strukturzonen<br>{mittel_s_wert} bis {mittel_wert}</p>
+    <p style="background:#2e1414;border-left:4px solid #a13f3a;padding:8px 12px;margin:4px 0;">🔴 <strong style="color:#f0a49f;">BÄRISCH</strong><br>unter Struktur-Support {mittel_s_wert}<br>Schwäche nimmt zu</p>
+    """
+
+    langfristig_html = f"""
+    <p style="background:#132a16;border-left:4px solid #3f8f4a;padding:8px 12px;margin:4px 0;">🟢 <strong style="color:#9fe39f;">BULLISCH</strong><br>über langfristigem Widerstand {lang_wert}<br>Trendwechsel möglich</p>
+    <p style="background:#2e2612;border-left:4px solid #a67f2e;padding:8px 12px;margin:4px 0;">🟡 <strong style="color:#f0d495;">NEUTRAL</strong><br>zwischen Langfrist-Zonen<br>{lang_s_wert} bis {lang_wert}</p>
+    <p style="background:#2e1414;border-left:4px solid #a13f3a;padding:8px 12px;margin:4px 0;">🔴 <strong style="color:#f0a49f;">BÄRISCH</strong><br>unter Langfrist-Support {lang_s_wert}<br>Strukturelle Schwäche</p>
+    """
+
+    szenarien_html = f"""
+    <tr>
+    <td width="33%" valign="top" style="padding-right:6px;">
+    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
+    <p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">KURZFRISTIG<br>INTRADAY</p>
+    {kurzfristig_html}
+    </div></td>
+    <td width="33%" valign="top" style="padding:0 6px;">
+    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
+    <p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">MITTELFRISTIG<br>STRUKTUR</p>
+    {mittelfristig_html}
+    </div></td>
+    <td width="33%" valign="top" style="padding-left:6px;">
+    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
+    <p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">LANGFRISTIG<br>POSITION</p>
+    {langfristig_html}
+    </div></td>
+    </tr>
+    """
 
     def level_boxen(werte, rand_farbe):
         """Kachel-Reihe wie im Screenshot: gleich breite, umrandete Boxen nebeneinander.
@@ -2803,7 +2855,7 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, daily_fuer_tageschart)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
