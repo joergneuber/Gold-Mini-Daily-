@@ -2240,15 +2240,26 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     # und wird aus dem bestehenden Szenarien-Block übernommen.
     kurzfristig_html = szenarien_html
 
-    # Dynamische Struktur-Szenarien aus vorhandenen Analyseebenen.
+    # Dynamische Struktur-Szenarien aus den vorhandenen Analyseebenen.
+    # Kurzfristig = Intraday-Szenario (oben).
+    # Mittelfristig = 6M-Struktur.
+    # Langfristig = Tageschart/Positionstrading-Ebene.
     def struktur_preise(zeitraum):
         z = zonen_je_zeitraum.get(zeitraum) if zonen_je_zeitraum else None
         if not z:
             return [], []
         return z.get("widerstandszonen", []), z.get("supportzonen", [])
 
+    # Keine breite historische Abfrage mehr: 36 Monate erzeugt für Gold
+    # teilweise für die aktuelle Analyse ungeeignete Extremzonen.
     mittel_w, mittel_s = struktur_preise(LANGFRIST_MONATE)
-    lang_w, lang_s = struktur_preise(36)
+
+    # Langfristig nutzt bevorzugt die Positionstrading-/Tageschart-Ebene.
+    # Falls diese nicht vorhanden ist, wird die mittelfristige Struktur als
+    # konservativer Fallback verwendet.
+    lang_w, lang_s = struktur_preise(12)
+    if not lang_w and not lang_s:
+        lang_w, lang_s = mittel_w, mittel_s
 
     mittel_wert = f"{mittel_w[0][0]:,.0f}".replace(",", ".") if mittel_w else "keine Zone"
     mittel_s_wert = f"{mittel_s[0][0]:,.0f}".replace(",", ".") if mittel_s else "keine Zone"
