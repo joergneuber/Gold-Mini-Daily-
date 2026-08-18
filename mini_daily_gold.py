@@ -2171,7 +2171,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, positionstrading_daten=None):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2236,64 +2236,132 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
                                            f"unter {fmt(szenarien['naechster_support'])} USD", ziel)
 
 
-    # Neues Layout: 3 Zeithorizonte. Die kurzfristige Logik bleibt unverändert
-    # und wird aus dem bestehenden Szenarien-Block übernommen.
-    kurzfristig_html = szenarien_html
+    # Neues Layout: drei gleich breite Zeithorizonte. Alle drei Spalten verwenden
+    # exakt dieselbe Kartenstruktur; die kurzfristigen Werte bleiben die bestehende
+    # Intraday-Szenario-Logik. Mittel- und Langfristwerte werden direkt aus den
+    # Analyseparametern der beiden sichtbaren Struktur-Charts abgeleitet, damit die
+    # Szenario-Marken mit den im jeweiligen Chart gezeigten Marken übereinstimmen.
 
-    # Dynamische Struktur-Szenarien aus den vorhandenen Analyseebenen.
-    # Kurzfristig = Intraday-Szenario (oben).
-    # Mittelfristig = 6M-Struktur.
-    # Langfristig = Tageschart/Positionstrading-Ebene.
-    def struktur_preise(zeitraum):
-        z = zonen_je_zeitraum.get(zeitraum) if zonen_je_zeitraum else None
-        if not z:
+    def szenario_zeilen(bull_marke, bull_ziel, neutral_text, baer_marke, baer_ziel,
+                        bull_text="Ausbruch bestätigt", baer_text="Struktur wird schwächer"):
+        ziel_bull = f" → Ziel {bull_ziel} USD" if bull_ziel else ""
+        ziel_baer = f" → Ziel {baer_ziel} USD" if baer_ziel else ""
+        return f"""
+        <p style="background:#132a16;border-left:4px solid #3f8f4a;padding:8px 12px;margin:4px 0;">🟢 <strong style="color:#9fe39f;">BULLISCH</strong><br>über {bull_marke} USD{ziel_bull}<br>{bull_text}</p>
+        <p style="background:#2e2612;border-left:4px solid #a67f2e;padding:8px 12px;margin:4px 0;">🟡 <strong style="color:#f0d495;">NEUTRAL</strong><br>{neutral_text}<br>abwarten</p>
+        <p style="background:#2e1414;border-left:4px solid #a13f3a;padding:8px 12px;margin:4px 0;">🔴 <strong style="color:#f0a49f;">BÄRISCH</strong><br>unter {baer_marke} USD{ziel_baer}<br>{baer_text}</p>
+        """
+
+    def fmt_szenario(preis):
+        return f"{preis:,.2f}".replace(",", ".")
+
+    def naechste_zonen(zonen, aktueller_kurs):
+        if not zonen:
             return [], []
-        return z.get("widerstandszonen", []), z.get("supportzonen", [])
+        def preise(items, oberhalb):
+            ergebnis = []
+            for item in items or []:
+                if isinstance(item, (tuple, list)) and item:
+                    p = float(item[0])
+                    if (oberhalb and p > aktueller_kurs) or ((not oberhalb) and p < aktueller_kurs):
+                        ergebnis.append(p)
+            return ergebnis
+        widerstaende = sorted(preise(zonen.get("widerstandszonen", []), True))
+        supports = sorted(preise(zonen.get("supportzonen", []), False), reverse=True)
+        return widerstaende, supports
 
-    # Mittelfristig: 6M-Strukturebene
-    mittel_w, mittel_s = struktur_preise(LANGFRIST_MONATE)
+    # Kurzfristig: exakt die bestehende Intraday-Szenario-Logik, aber in derselben
+    # Kartenstruktur wie Mittel-/Langfristig.
+    kurz_bull = fmt_szenario(szenarien["naechster_widerstand"]) if szenarien.get("naechster_widerstand") is not None else "keine Zone"
+    kurz_baer = fmt_szenario(szenarien["naechster_support"]) if szenarien.get("naechster_support") is not None else "keine Zone"
+    kurz_ziel_bull = fmt_szenario(szenarien["ziel_bullisch"]) if szenarien.get("ziel_bullisch") is not None else None
+    kurz_ziel_baer = fmt_szenario(szenarien["ziel_baerisch"]) if szenarien.get("ziel_baerisch") is not None else None
+    kurz_neutral = f"{kurz_baer} bis {kurz_bull} USD"
+    kurzfristig_html = szenario_zeilen(kurz_bull, kurz_ziel_bull, kurz_neutral, kurz_baer, kurz_ziel_baer)
 
-    # Langfristig: eigene langfristige Strukturebene.
-    # Nicht dieselbe Quelle wie mittelfristig verwenden.
-    # Die Zonen werden aus dem bereits berechneten 36M-Bereich genommen.
-    lang_w, lang_s = struktur_preise(36)
+    # Mittelfristig: exakt dieselbe 6M-Struktur-Berechnung wie im sichtbaren
+    # 6M-Chart. Zusätzlich werden die bereits sichtbaren 3M/6M-Reaktionszonen
+    # herangezogen, damit Trigger und nächstes Ziel aus derselben Chart-Ebene kommen.
+    mittel_w = mittel_s = []
+    mittel_kombi_w = mittel_kombi_s = []
+    if struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
+        mittel_roh = analysiere_reaktionszonen(
+            struktur_6m_daten,
+            fenster=LANGFRIST_ZONEN_FENSTER,
+            bucket_usd=LANGFRIST_ZONEN_BUCKET_USD,
+            min_treffer=LANGFRIST_ZONEN_MIN_TREFFER,
+            top_n=LANGFRIST_ZONEN_TOP_N * 3,
+        )
+        mittel_zonen = zonen_naechste_filter(
+            mittel_roh,
+            referenz_preis=float(struktur_6m_daten["Close"].iloc[-1]),
+            min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
+            top_n=LANGFRIST_ZONEN_TOP_N,
+        )
+        mittel_w, mittel_s = naechste_zonen(mittel_zonen, float(struktur_6m_daten["Close"].iloc[-1]))
 
-    # Falls die langfristige Ebene nicht verfügbar ist, bleibt der Report
-    # funktionsfähig und nutzt die mittelfristige Ebene als Notfall-Fallback.
-    if not lang_w and not lang_s:
-        lang_w, lang_s = mittel_w, mittel_s
+        mittel_kombi = kombiniere_zonen(
+            {k: v for k, v in (zonen_je_zeitraum or {}).items() if k in (3, LANGFRIST_MONATE)}
+        )
+        mittel_kombi_w, mittel_kombi_s = naechste_zonen(mittel_kombi, float(struktur_6m_daten["Close"].iloc[-1]))
 
-    mittel_wert = f"{mittel_w[0][0]:,.0f}".replace(",", ".") if mittel_w else "keine Zone"
-    mittel_s_wert = f"{mittel_s[0][0]:,.0f}".replace(",", ".") if mittel_s else "keine Zone"
-    lang_wert = f"{lang_w[0][0]:,.0f}".replace(",", ".") if lang_w else "keine Zone"
-    lang_s_wert = f"{lang_s[0][0]:,.0f}".replace(",", ".") if lang_s else "keine Zone"
+    mittel_bull = fmt_szenario(mittel_w[0]) if mittel_w else "keine Zone"
+    mittel_baer = fmt_szenario(mittel_s[0]) if mittel_s else "keine Zone"
+    mittel_neutral = f"{mittel_baer} bis {mittel_bull} USD"
+    mittel_ziel = fmt_szenario(mittel_kombi_w[0]) if mittel_kombi_w and mittel_kombi_w[0] > (mittel_w[0] if mittel_w else 0) else None
+    mittel_ziel_baer = fmt_szenario(mittel_kombi_s[0]) if mittel_kombi_s and mittel_kombi_s[0] < (mittel_s[0] if mittel_s else float('inf')) else None
+    mittelfristig_html = szenario_zeilen(
+        mittel_bull, mittel_ziel, mittel_neutral, mittel_baer, mittel_ziel_baer,
+        bull_text="6M-Strukturwiderstand überwunden",
+        baer_text="6M-Strukturunterstützung gebrochen",
+    )
 
-    mittelfristig_html = f"""
-    <p style="background:#132a16;border-left:4px solid #3f8f4a;padding:8px 12px;margin:4px 0;">🟢 <strong style="color:#9fe39f;">BULLISCH</strong><br>über Strukturwiderstand {mittel_wert}<br>Ausbruch bestätigt</p>
-    <p style="background:#2e2612;border-left:4px solid #a67f2e;padding:8px 12px;margin:4px 0;">🟡 <strong style="color:#f0d495;">NEUTRAL</strong><br>zwischen Strukturzonen<br>{mittel_s_wert} bis {mittel_wert}</p>
-    <p style="background:#2e1414;border-left:4px solid #a13f3a;padding:8px 12px;margin:4px 0;">🔴 <strong style="color:#f0a49f;">BÄRISCH</strong><br>unter Struktur-Support {mittel_s_wert}<br>Schwäche nimmt zu</p>
-    """
+    # Langfristig: dieselbe Tageschart-Zonenberechnung wie im sichtbaren
+    # Positionstrading-Tageschart. NICHT die 36M-Reaktionszonen verwenden.
+    lang_w = lang_s = []
+    if positionstrading_daten is not None and len(positionstrading_daten) > 0:
+        lang_roh = analysiere_reaktionszonen(
+            positionstrading_daten,
+            fenster=TAGESCHART_ZONEN_FENSTER,
+            bucket_usd=TAGESCHART_ZONEN_BUCKET_USD,
+            min_treffer=TAGESCHART_ZONEN_MIN_TREFFER,
+            top_n=TAGESCHART_ZONEN_TOP_N * 3,
+        )
+        lang_zonen = zonen_naechste_filter(
+            lang_roh,
+            referenz_preis=float(positionstrading_daten["Close"].iloc[-1]),
+            min_abstand_usd=TAGESCHART_ZONEN_MIN_ABSTAND_USD,
+            top_n=TAGESCHART_ZONEN_TOP_N,
+        )
+        lang_w, lang_s = naechste_zonen(lang_zonen, float(positionstrading_daten["Close"].iloc[-1]))
 
-    langfristig_html = f"""
-    <p style="background:#132a16;border-left:4px solid #3f8f4a;padding:8px 12px;margin:4px 0;">🟢 <strong style="color:#9fe39f;">BULLISCH</strong><br>über langfristigem Widerstand {lang_wert}<br>Trendwechsel möglich</p>
-    <p style="background:#2e2612;border-left:4px solid #a67f2e;padding:8px 12px;margin:4px 0;">🟡 <strong style="color:#f0d495;">NEUTRAL</strong><br>zwischen Langfrist-Zonen<br>{lang_s_wert} bis {lang_wert}</p>
-    <p style="background:#2e1414;border-left:4px solid #a13f3a;padding:8px 12px;margin:4px 0;">🔴 <strong style="color:#f0a49f;">BÄRISCH</strong><br>unter Langfrist-Support {lang_s_wert}<br>Strukturelle Schwäche</p>
-    """
+    lang_bull = fmt_szenario(lang_w[0]) if lang_w else "keine Zone"
+    lang_baer = fmt_szenario(lang_s[0]) if lang_s else "keine Zone"
+    lang_neutral = f"{lang_baer} bis {lang_bull} USD"
+    lang_ziel = fmt_szenario(lang_w[1]) if len(lang_w) > 1 else None
+    lang_ziel_baer = fmt_szenario(lang_s[1]) if len(lang_s) > 1 else None
+    langfristig_html = szenario_zeilen(
+        lang_bull, lang_ziel, lang_neutral, lang_baer, lang_ziel_baer,
+        bull_text="Positionstrading-Struktur überwunden",
+        baer_text="Positionstrading-Unterstützung gebrochen",
+    )
 
+    # Alle drei Spalten identisch aufgebaut und mit table-layout:fixed auf exakt
+    # 33,333 % gezwungen. Das entspricht dem Raster der drei Statuskarten darüber.
     szenarien_html = f"""
     <tr>
-    <td width="33%" valign="top" style="padding-right:6px;">
-    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
+    <td width="33.3333%" valign="top" style="width:33.3333%;padding:0 6px 0 0;box-sizing:border-box;">
+    <div style="width:100%;box-sizing:border-box;background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
     <p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">KURZFRISTIG<br>INTRADAY</p>
     {kurzfristig_html}
     </div></td>
-    <td width="33%" valign="top" style="padding:0 6px;">
-    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
+    <td width="33.3333%" valign="top" style="width:33.3333%;padding:0 3px;box-sizing:border-box;">
+    <div style="width:100%;box-sizing:border-box;background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
     <p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">MITTELFRISTIG<br>STRUKTUR</p>
     {mittelfristig_html}
     </div></td>
-    <td width="33%" valign="top" style="padding-left:6px;">
-    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
+    <td width="33.3333%" valign="top" style="width:33.3333%;padding:0 0 0 6px;box-sizing:border-box;">
+    <div style="width:100%;box-sizing:border-box;background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:12px;">
     <p style="color:#a89d87;font-size:11px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px 0;">LANGFRISTIG<br>POSITION</p>
     {langfristig_html}
     </div></td>
@@ -2355,7 +2423,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     {warnblock}
     {marktevents_html}
 
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:6px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;table-layout:fixed;margin-bottom:6px;">
     <tr>
     {kachel("Realtime Indikation", f'<p style="font-size:24px;font-family:serif;color:#e8b95c;margin:0;">{fmt(daten["realtime"])} USD</p>')}
     {kachel("Tendenz (zum Schlusskurs)", f'<p style="font-size:19px;font-family:serif;margin:0;">{tendenz_label} ({tendenz_pct:+.2f}%)</p>')}
@@ -2364,7 +2432,7 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </table>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:20px 0 8px 0;">Szenarien</h3>
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">{szenarien_html}</table>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;table-layout:fixed;">{szenarien_html}</table>
 
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:10px;">
     <tr>
@@ -2868,7 +2936,7 @@ def main():
     if daily_fuer_tageschart is not None:
         chart_tages_pfad = baue_tageschart(daily_fuer_tageschart, positionstrading_status)
 
-    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, daily_fuer_tageschart)
+    html = baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_pfad, chart_tages_pfad, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, daily_lang, daily_fuer_tageschart)
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
