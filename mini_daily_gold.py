@@ -1742,6 +1742,28 @@ def baue_tageschart(daily, status, pfad="chart_tages.png"):
     return pfad
 
 
+def berechne_6m_strukturzonen(daily):
+    """Berechnet exakt die 6M-Strukturzonen, die im sichtbaren 6M-Chart
+    dargestellt werden. Chart und mittelfristige Szenario-Karte greifen damit
+    auf dieselbe Datenquelle und dieselben Parameter zurück."""
+    if daily is None or len(daily) == 0:
+        return {"widerstandszonen": [], "supportzonen": []}
+
+    roh = analysiere_reaktionszonen(
+        daily,
+        fenster=LANGFRIST_ZONEN_FENSTER,
+        bucket_usd=LANGFRIST_ZONEN_BUCKET_USD,
+        min_treffer=LANGFRIST_ZONEN_MIN_TREFFER,
+        top_n=LANGFRIST_ZONEN_TOP_N * 3,
+    )
+    return zonen_naechste_filter(
+        roh,
+        referenz_preis=float(daily["Close"].iloc[-1]),
+        min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
+        top_n=LANGFRIST_ZONEN_TOP_N,
+    )
+
+
 def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     """6-Monats-Tageschart mit eigenem Trendkanal, Formationserkennung, Range-Boxen
     und strukturellen Zonen (eigene, größere Parameter, siehe LANGFRIST_*), plus
@@ -1816,13 +1838,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     # Zonenvergleich in main() stammen). Andere Linienart, damit beide im Chart
     # unterscheidbar bleiben. zonen_naechste_filter: nah beieinanderliegende Zonen
     # zusammenlegen und nur die top_n NÄCHSTEN zum aktuellen Kurs behalten.
-    lang_struktur_zonen_roh = analysiere_reaktionszonen(daily, fenster=LANGFRIST_ZONEN_FENSTER,
-                                                           bucket_usd=LANGFRIST_ZONEN_BUCKET_USD,
-                                                           min_treffer=LANGFRIST_ZONEN_MIN_TREFFER,
-                                                           top_n=LANGFRIST_ZONEN_TOP_N * 3)
-    lang_struktur_zonen = zonen_naechste_filter(lang_struktur_zonen_roh, referenz_preis=float(schluss.iloc[-1]),
-                                                  min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
-                                                  top_n=LANGFRIST_ZONEN_TOP_N)
+    lang_struktur_zonen = berechne_6m_strukturzonen(daily)
     aktueller_kurs_lang = float(schluss.iloc[-1])
     for preis, treffer in lang_struktur_zonen["widerstandszonen"]:
         ax.axhline(preis, color="#8a5245", linewidth=1.0, linestyle="-.", alpha=0.6, zorder=2)
@@ -2279,40 +2295,62 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     kurz_neutral = f"{kurz_baer} bis {kurz_bull} USD"
     kurzfristig_html = szenario_zeilen(kurz_bull, kurz_ziel_bull, kurz_neutral, kurz_baer, kurz_ziel_baer)
 
-    # Mittelfristig: Die Szenario-Karte muss die MARKEN verwenden, die im
-    # sichtbaren 6M-Chart tatsächlich beschriftet sind. Dieser Chart zeigt zwei
-    # Quellen gemeinsam:
-    #   1) eigene 6M-Strukturzonen (z.B. 4.442 / 4.184)
-    #   2) kombinierte 3M/6M-Reaktionszonen (z.B. 4.786 / 4.010)
-    # Für die Szenarien werden beide Quellen zusammengeführt und nur nahezu
-    # identische Doppelungen entfernt. Dadurch ergibt sich beim aktuellen Kurs
-    # korrekt: Trigger 4.442 / Support 4.184 / Ziele 4.786 und 4.010.
-    mittel_w = mittel_s = []
-    mittel_ziel_w = mittel_ziel_s = []
-    if struktur_6m_szenario_zonen is not None and struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
+    # Mittelfristig: Trigger und Support kommen EXAKT aus denselben 6M-
+    # Strukturzonen wie der sichtbare 6M-Chart. Die Ziele kommen aus den
+    # bereits im Chart zusätzlich dargestellten kombinierten 3M/6M-Zonen.
+    # Dadurch bleibt die Karte semantisch sauber:
+    #   Trigger = 6M-Strukturmarke
+    #   Ziel    = nächste übergeordnete Reaktionszone
+    mittel_bull = mittel_baer = "keine Zone"
+    mittel_ziel_bull = mittel_ziel_baer = None
+
+    if struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
         mittel_kurs = float(struktur_6m_daten["Close"].iloc[-1])
+        mittel_6m = berechne_6m_strukturzonen(struktur_6m_daten)
 
-        def zusammenfuehren_szenario_zonen(z1, z2, dedup_abstand_usd=20.0):
-            ergebnis = {"widerstandszonen": [], "supportzonen": []}
-            for key in ("widerstandszonen", "supportzonen"):
-                kandidaten = []
-                for quelle in (z1 or {}, z2 or {}):
-                    for item in quelle.get(key, []) or []:
-                        if isinstance(item, (tuple, list)) and item:
-                            kandidaten.append(float(item[0]))
-                kandidaten = sorted(set(round(p, 2) for p in kandidaten))
-                for preis in kandidaten:
-                    if not any(abs(preis - vorhanden) < dedup_abstand_usd
-                               for vorhanden in ergebnis[key]):
-                        ergebnis[key].append(preis)
-            return ergebnis
-
-        mittel_alle_zonen = zusammenfuehren_szenario_zonen(
-            struktur_6m_szenario_zonen,
-            struktur_6m_reaktionszonen,
+        widerstaende_6m = sorted(
+            [float(x[0]) for x in mittel_6m.get("widerstandszonen", [])]
         )
-        mittel_w, mittel_s = naechste_zonen(mittel_alle_zonen, mittel_kurs)
-        mittel_ziel_w, mittel_ziel_s = mittel_w, mittel_s
+        supports_6m = sorted(
+            [float(x[0]) for x in mittel_6m.get("supportzonen", [])],
+            reverse=True,
+        )
+
+        # Exakte nächste 6M-Marken relativ zum aktuellen Kurs.
+        bull_trigger = next((x for x in widerstaende_6m if x > mittel_kurs), None)
+        bear_trigger = next((x for x in supports_6m if x < mittel_kurs), None)
+
+        if bull_trigger is not None:
+            mittel_bull = fmt_szenario(bull_trigger)
+        if bear_trigger is not None:
+            mittel_baer = fmt_szenario(bear_trigger)
+
+        # Ziele: nächste kombinierte Reaktionszone JENSEITS des jeweiligen
+        # 6M-Triggers. Diese entsprechen den zusätzlich im 6M-Chart sichtbaren
+        # übergeordneten Marken (z.B. 4.786 bzw. 4.010).
+        reak_w = sorted(
+            [float(x[0]) for x in (struktur_6m_reaktionszonen or {}).get("widerstandszonen", [])]
+        )
+        reak_s = sorted(
+            [float(x[0]) for x in (struktur_6m_reaktionszonen or {}).get("supportzonen", [])],
+            reverse=True,
+        )
+
+        if bull_trigger is not None:
+            ziel = next((x for x in reak_w if x > bull_trigger + 1e-6), None)
+            if ziel is not None:
+                mittel_ziel_bull = fmt_szenario(ziel)
+
+        if bear_trigger is not None:
+            ziel = next((x for x in reak_s if x < bear_trigger - 1e-6), None)
+            if ziel is not None:
+                mittel_ziel_baer = fmt_szenario(ziel)
+
+    mittel_neutral = f"{mittel_baer} bis {mittel_bull} USD"
+    mittel_szenario_html = szenario_zeilen(
+        mittel_bull, mittel_ziel_bull, mittel_neutral,
+        mittel_baer, mittel_ziel_baer,
+    )
 
     mittel_bull = fmt_szenario(mittel_w[0]) if mittel_w else "keine Zone"
     mittel_baer = fmt_szenario(mittel_s[0]) if mittel_s else "keine Zone"
@@ -2929,31 +2967,14 @@ def main():
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday,
                              range_ausbruch_status=range_ausbruch_status)
     chart_lang_pfad = None
-    # Exakt dieselben 6M-Strukturzonen wie im sichtbaren 6M-Chart vorbereiten.
-    # Diese Quelle wird anschließend auch für die mittelfristige Szenario-Karte
-    # verwendet. Dadurch können Szenario-Marken nicht mehr aus den separaten
-    # 3M/6M-Reaktionszonen stammen (z.B. 4.786 statt der sichtbaren 4.442).
-    struktur_6m_szenario_zonen = None
-    if daily_lang is not None and len(daily_lang) > 0:
-        struktur_6m_zonen_roh = analysiere_reaktionszonen(
-            daily_lang,
-            fenster=LANGFRIST_ZONEN_FENSTER,
-            bucket_usd=LANGFRIST_ZONEN_BUCKET_USD,
-            min_treffer=LANGFRIST_ZONEN_MIN_TREFFER,
-            top_n=LANGFRIST_ZONEN_TOP_N * 3,
-        )
-        struktur_6m_szenario_zonen = zonen_naechste_filter(
-            struktur_6m_zonen_roh,
-            referenz_preis=float(daily_lang["Close"].iloc[-1]),
-            min_abstand_usd=LANGFRIST_ZONEN_MIN_ABSTAND_USD,
-            top_n=LANGFRIST_ZONEN_TOP_N,
-        )
+    # Eine gemeinsame 6M-Zonenquelle für Chart und mittelfristige Karte.
+    struktur_6m_szenario_zonen = berechne_6m_strukturzonen(daily_lang) if daily_lang is not None else None
 
     if daily_lang is not None:
         chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
 
-    # Für die mittelfristige Szenario-Karte ebenfalls exakt die im sichtbaren
-    # 6M-Chart verwendeten 3M/6M-Reaktionszonen weiterreichen.
+    # Zusätzlich die bereits im 6M-Chart sichtbaren kombinierten 3M/6M-Zonen
+    # für die übergeordneten Szenario-Ziele weiterreichen.
     struktur_6m_reaktionszonen = kombinierte_zonen_lang
 
     positionstrading_status = berechne_positionstrading_status()
