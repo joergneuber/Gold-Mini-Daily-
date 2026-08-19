@@ -2307,7 +2307,10 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     if struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
         mittel_kurs = float(struktur_6m_daten["Close"].iloc[-1])
-        mittel_6m = berechne_6m_strukturzonen(struktur_6m_daten)
+
+        # NICHT neu berechnen: exakt dasselbe 6M-Zonenobjekt verwenden,
+        # das main() bereits an den 6M-Chart übergibt.
+        mittel_6m = struktur_6m_szenario_zonen or {"widerstandszonen": [], "supportzonen": []}
 
         widerstaende_6m = sorted(
             [float(x[0]) for x in mittel_6m.get("widerstandszonen", [])]
