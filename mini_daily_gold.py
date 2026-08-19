@@ -2171,7 +2171,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None, struktur_6m_reaktionszonen=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2279,15 +2279,39 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     kurz_neutral = f"{kurz_baer} bis {kurz_bull} USD"
     kurzfristig_html = szenario_zeilen(kurz_bull, kurz_ziel_bull, kurz_neutral, kurz_baer, kurz_ziel_baer)
 
-    # Mittelfristig: exakt dieselben Reaktionszonen verwenden, die der sichtbare
-    # 6M-Chart bereits aus dem 3M/6M-Zonenvergleich erhält. Dadurch stimmen die
-    # Szenario-Marken mit den tatsächlich im Chart beschrifteten Strukturmarken
-    # überein (insbesondere 4.442 / 4.184 / 4.010 / 4.786).
+    # Mittelfristig: Die Szenario-Karte muss die MARKEN verwenden, die im
+    # sichtbaren 6M-Chart tatsächlich beschriftet sind. Dieser Chart zeigt zwei
+    # Quellen gemeinsam:
+    #   1) eigene 6M-Strukturzonen (z.B. 4.442 / 4.184)
+    #   2) kombinierte 3M/6M-Reaktionszonen (z.B. 4.786 / 4.010)
+    # Für die Szenarien werden beide Quellen zusammengeführt und nur nahezu
+    # identische Doppelungen entfernt. Dadurch ergibt sich beim aktuellen Kurs
+    # korrekt: Trigger 4.442 / Support 4.184 / Ziele 4.786 und 4.010.
     mittel_w = mittel_s = []
     mittel_ziel_w = mittel_ziel_s = []
     if struktur_6m_szenario_zonen is not None and struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
         mittel_kurs = float(struktur_6m_daten["Close"].iloc[-1])
-        mittel_w, mittel_s = naechste_zonen(struktur_6m_szenario_zonen, mittel_kurs)
+
+        def zusammenfuehren_szenario_zonen(z1, z2, dedup_abstand_usd=20.0):
+            ergebnis = {"widerstandszonen": [], "supportzonen": []}
+            for key in ("widerstandszonen", "supportzonen"):
+                kandidaten = []
+                for quelle in (z1 or {}, z2 or {}):
+                    for item in quelle.get(key, []) or []:
+                        if isinstance(item, (tuple, list)) and item:
+                            kandidaten.append(float(item[0]))
+                kandidaten = sorted(set(round(p, 2) for p in kandidaten))
+                for preis in kandidaten:
+                    if not any(abs(preis - vorhanden) < dedup_abstand_usd
+                               for vorhanden in ergebnis[key]):
+                        ergebnis[key].append(preis)
+            return ergebnis
+
+        mittel_alle_zonen = zusammenfuehren_szenario_zonen(
+            struktur_6m_szenario_zonen,
+            struktur_6m_reaktionszonen,
+        )
+        mittel_w, mittel_s = naechste_zonen(mittel_alle_zonen, mittel_kurs)
         mittel_ziel_w, mittel_ziel_s = mittel_w, mittel_s
 
     mittel_bull = fmt_szenario(mittel_w[0]) if mittel_w else "keine Zone"
@@ -2928,6 +2952,10 @@ def main():
     if daily_lang is not None:
         chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
 
+    # Für die mittelfristige Szenario-Karte ebenfalls exakt die im sichtbaren
+    # 6M-Chart verwendeten 3M/6M-Reaktionszonen weiterreichen.
+    struktur_6m_reaktionszonen = kombinierte_zonen_lang
+
     positionstrading_status = berechne_positionstrading_status()
     print(f"Positionstrading-Status: {positionstrading_status['status']}")
 
@@ -2945,7 +2973,8 @@ def main():
         daten, pivots, tendenz_label, tendenz_pct, rueckblick_text,
         chart_pfad, chart_tages_pfad, positionstrading_status,
         range_ausbruch_status, economic_events_block, zonen_je_zeitraum,
-        daily_lang, daily_fuer_tageschart, struktur_6m_szenario_zonen
+        daily_lang, daily_fuer_tageschart, struktur_6m_szenario_zonen,
+        struktur_6m_reaktionszonen
     )
     text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
 
