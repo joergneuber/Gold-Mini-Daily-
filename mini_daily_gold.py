@@ -2269,7 +2269,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         """
 
     def fmt_szenario(preis):
-        return f"{preis:,.2f}".replace(",", ".")
+        # Deutsche Kursdarstellung: Tausenderpunkt + Dezimalkomma.
+        return f"{preis:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     def naechste_zonen(zonen, aktueller_kurs):
         if not zonen:
