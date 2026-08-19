@@ -645,8 +645,23 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, l
     - Die vom Programm gelieferten Kursmarken sind verbindlich. Erfinde,
       verändere oder verschiebe keine Kursmarken.
 
-Schreibe einen Rückblick-Absatz (genau 6-7 Sätze, deutsch, sachlich, ohne Anrede,
-ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
+Schreibe einen kompakten charttechnischen Ausblick in GENAU 6 Sätzen,
+deutsch, sachlich, ohne Anrede und ohne Kauf-/Verkaufsempfehlung. Die 6 Sätze sind
+verbindlich auf die drei Zeithorizonte aufzuteilen:
+
+1. KURZFRISTIG / INTRADAY – genau 2 Sätze. Horizont: heute bzw. nächste Handelsstunden.
+   Nutze ausschließlich die Intraday-Daten und Intraday-Marken für diese beiden Sätze.
+2. MITTELFRISTIG / 6M-STRUKTUR – genau 1 Satz. Horizont: mehrere Wochen bis einige Monate.
+   Nutze hierfür die strukturellen Zonen der längeren Zeitfenster und die übergeordnete
+   6M-Struktur, nicht die reinen Intraday-Pivots.
+3. LANGFRISTIG / POSITION – genau 1 Satz. Horizont: mehrere Monate bis langfristig.
+   Nutze hierfür ausschließlich die übergeordnete Tageschart-/Positionstrading-Struktur.
+4. FAZIT – genau 2 Sätze. Beide Sätze beginnen mit "Fazit:" und fassen die drei Horizonte
+   getrennt und knapp zusammen.
+
+Jeder Satz des Ausblicks muss durch seine Kennzeichnung eindeutig einem Zeithorizont
+zugeordnet sein. Vermische keine Marken oder Aussagen verschiedener Zeithorizonte.
+
 
 Intraday-Daten (kurzfristig):
 - Realtime-Kurs: {daten['realtime']:.2f} USD
@@ -667,35 +682,26 @@ sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Piv
 Fenster zeigen eher aktuell relevante Zonen, längere Fenster eher übergeordnete Struktur):
 {zonen_block}
 
-Beschreibe zuerst die aktuelle Lage relativ zu den Intraday-Marken. Nenne dabei EXPLIZIT
-die beiden oben vorgegebenen Szenario-Marken (Aufwärts-Trigger und Abwärts-Trigger samt
-ihrer jeweiligen Ziele) in eigenen Worten eingebettet in den Fließtext - erfinde KEINE
-eigenen abweichenden Trigger-Kurse (z.B. nicht das reine Intraday-Hoch/-Tief als Trigger
-verwenden), auch wenn die Intraday-Hoch/-Tief-Werte oben als zusätzlicher Kontext
-mitgegeben werden.
+Für KURZFRISTIG / INTRADAY müssen die beiden vorgegebenen Szenario-Marken
+(Aufwärts-Trigger und Abwärts-Trigger samt Ziele) ausdrücklich genannt werden; erfinde
+keine abweichenden Trigger-Kurse.
 
-Ordne die Kursbewegung anschließend, gestützt auf die Reaktionszonen der verschiedenen
-Zeitfenster (falls vorhanden - bevorzuge dabei das kürzeste Fenster mit brauchbaren
-Zonen nahe am aktuellen Kurs), knapp einer gängigen charttechnischen Formation zu (z.B.
-aufsteigendes/absteigendes/symmetrisches Dreieck, Seitwärtskanal, Doppel-Top,
-Doppel-Boden, Flagge, Keil) und benenne sie explizit im Text. Falls vorhanden, kannst du
-den saisonalen Kontext knapp als zusätzliche Einordnung erwähnen - er ersetzt aber nicht
-die charttechnische Analyse und ist kein eigenständiges Signal. Falls auch über alle
-Zeitfenster hinweg keine seriöse Einschätzung möglich ist, sag das knapp statt zu
-spekulieren - keine erfundene Formation nennen, nur um etwas zu benennen.
+Für MITTELFRISTIG / 6M-STRUKTUR ordne die Lage ausschließlich anhand der strukturellen
+Zonen und der übergeordneten 6M-Struktur ein. Verwende keine Intraday-Pivotmarke als
+mittelfristigen Trigger, wenn dafür eine eigene 6M-Strukturmarke vorliegt.
 
-Bleib trotz der zwei Szenarien und der Formationseinordnung im vorgegebenen Rahmen von
-6-7 Sätzen - fasse dich pro Punkt knapp statt jeden Aspekt breit auszuführen.
-Keine Übertreibungen, keine Prognosen mit Sicherheit formuliert. Wenn die langfristige Chartstruktur als
-Abwärtskanal vorgegeben ist, muss die Einordnung ausdrücklich zwischen kurzfristiger Erholung und
-übergeordneter Abwärtsstruktur unterscheiden; formuliere dann nicht „intakter Aufwärtstrendkanal“.
+Für LANGFRISTIG / POSITION ordne ausschließlich die übergeordnete Tageschart-/Positionstrading-
+Struktur ein. Wenn ein übergeordneter Abwärtskanal vorgegeben ist, muss klar zwischen
+kurzfristiger Erholung und übergeordneter Abwärtsstruktur unterschieden werden.
+
+Ordne die Kursbewegung dort, wo es für den jeweiligen Horizont seriös möglich ist, knapp
+einer gängigen charttechnischen Formation zu. Falls keine seriöse Formation erkennbar
+ist, sage das statt zu spekulieren. Saisonaler Kontext darf nur ergänzend erwähnt werden.
 
 
-Schließe den Absatz mit exakt zwei Sätzen ab, die explizit mit "Fazit:" beginnen und die
-Lage auf den Punkt bringen (welcher Trend aktuell überwiegt und ob der Aufwärts- oder der
-Abwärts-Trigger aus den oben vorgegebenen Szenario-Marken kurzfristig wahrscheinlicher
-zuerst erreicht wird) - diese zwei Sätze zählen mit zum 6-7-Sätze-Rahmen, sind kein
-zusätzlicher Absatz."""
+Die zwei Fazit-Sätze sind Teil der exakt 6 Sätze und dürfen keine neuen Kursmarken
+einführen. Sie müssen die Aussagen der drei Zeithorizonte nur zusammenfassen und klar
+kennzeichnen, auf welchen Horizont sie sich beziehen."""
 
     # Gemini-Fallback: bei temporaeren API-/Ueberlastungsfehlern werden
     # mehrere verfuegbare Modelle nacheinander versucht. Pro Modell maximal
