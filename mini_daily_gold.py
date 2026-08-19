@@ -1764,7 +1764,7 @@ def berechne_6m_strukturzonen(daily):
     )
 
 
-def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
+def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png", struktur_zonen=None):
     """6-Monats-Tageschart mit eigenem Trendkanal, Formationserkennung, Range-Boxen
     und strukturellen Zonen (eigene, größere Parameter, siehe LANGFRIST_*), plus
     den bereits berechneten Reaktionszonen als Linien - macht sichtbar, wo die im
@@ -1838,7 +1838,7 @@ def baue_langfrist_chart(daily, zonen, pfad="chart_langfrist.png"):
     # Zonenvergleich in main() stammen). Andere Linienart, damit beide im Chart
     # unterscheidbar bleiben. zonen_naechste_filter: nah beieinanderliegende Zonen
     # zusammenlegen und nur die top_n NÄCHSTEN zum aktuellen Kurs behalten.
-    lang_struktur_zonen = berechne_6m_strukturzonen(daily)
+    lang_struktur_zonen = struktur_zonen if struktur_zonen is not None else berechne_6m_strukturzonen(daily)
     aktueller_kurs_lang = float(schluss.iloc[-1])
     for preis, treffer in lang_struktur_zonen["widerstandszonen"]:
         ax.axhline(preis, color="#8a5245", linewidth=1.0, linestyle="-.", alpha=0.6, zorder=2)
@@ -2967,7 +2967,7 @@ def main():
     struktur_6m_szenario_zonen = berechne_6m_strukturzonen(daily_lang) if daily_lang is not None else None
 
     if daily_lang is not None:
-        chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang)
+        chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang, struktur_zonen=struktur_6m_szenario_zonen)
 
     # Zusätzlich die bereits im 6M-Chart sichtbaren kombinierten 3M/6M-Zonen
     # für die übergeordneten Szenario-Ziele weiterreichen.
