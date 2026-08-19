@@ -2352,13 +2352,8 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         mittel_baer, mittel_ziel_baer,
     )
 
-    mittel_bull = fmt_szenario(mittel_w[0]) if mittel_w else "keine Zone"
-    mittel_baer = fmt_szenario(mittel_s[0]) if mittel_s else "keine Zone"
-    mittel_neutral = f"{mittel_baer} bis {mittel_bull} USD"
-    mittel_ziel = fmt_szenario(mittel_ziel_w[1]) if len(mittel_ziel_w) > 1 else None
-    mittel_ziel_baer = fmt_szenario(mittel_ziel_s[1]) if len(mittel_ziel_s) > 1 else None
     mittelfristig_html = szenario_zeilen(
-        mittel_bull, mittel_ziel, mittel_neutral, mittel_baer, mittel_ziel_baer,
+        mittel_bull, mittel_ziel_bull, mittel_neutral, mittel_baer, mittel_ziel_baer,
         bull_text="6M-Strukturwiderstand überwunden",
         baer_text="6M-Strukturunterstützung gebrochen",
     )
