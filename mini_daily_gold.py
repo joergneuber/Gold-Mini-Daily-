@@ -629,6 +629,22 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, l
         szenarien_block += "\n"
 
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold Spot (XAU/USD).
+
+
+    ZEITHORIZONTE FÜR DIE INTERPRETATION:
+    - KURZFRISTIG / INTRADAY: Horizont heute bzw. nächste Handelsstunden.
+      Beurteile ausschließlich die kurzfristige Intraday-Situation.
+    - MITTELFRISTIG / 6M-STRUKTUR: Horizont mehrere Wochen bis einige Monate.
+      Beurteile ausschließlich die übergeordnete 6M-Struktur.
+    - LANGFRISTIG / POSITION: Horizont mehrere Monate bis langfristig.
+      Beurteile ausschließlich die langfristige Positionstrading-Struktur.
+
+    WICHTIG:
+    - Nenne bei jedem Ausblick ausdrücklich den zugehörigen Zeithorizont.
+    - Vermische keine Marken oder Aussagen verschiedener Zeithorizonte.
+    - Die vom Programm gelieferten Kursmarken sind verbindlich. Erfinde,
+      verändere oder verschiebe keine Kursmarken.
+
 Schreibe einen Rückblick-Absatz (genau 6-7 Sätze, deutsch, sachlich, ohne Anrede,
 ohne Kauf-/Verkaufsempfehlung) im Stil eines Intraday-Briefings.
 
