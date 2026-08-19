@@ -2312,17 +2312,29 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         # das main() bereits an den 6M-Chart übergibt.
         mittel_6m = struktur_6m_szenario_zonen or {"widerstandszonen": [], "supportzonen": []}
 
-        widerstaende_6m = sorted(
-            [float(x[0]) for x in mittel_6m.get("widerstandszonen", [])]
-        )
-        supports_6m = sorted(
-            [float(x[0]) for x in mittel_6m.get("supportzonen", [])],
-            reverse=True,
-        )
+        # WICHTIG: Der 6M-Chart selbst klassifiziert die Strukturzonen NICHT
+        # nach dem Dict-Schlüssel, sondern nach ihrer Lage zum aktuellen Kurs:
+        #   preis > aktueller Kurs -> Widerstand
+        #   preis < aktueller Kurs -> Support
+        # Daher müssen wir für die Szenariokarte ebenfalls ALLE 6M-Zonen
+        # zusammenführen. Sonst kann z.B. 4.184 intern in "widerstandszonen"
+        # stehen, vom Chart aber korrekt als "6M-Support 4.184" beschriftet
+        # werden. Genau das war der Fehler im echten Lauf.
+        alle_6m_preise = sorted(set(
+            float(x[0])
+            for key in ("widerstandszonen", "supportzonen")
+            for x in mittel_6m.get(key, []) or []
+        ))
 
-        # Exakte nächste 6M-Marken relativ zum aktuellen Kurs.
-        bull_trigger = next((x for x in widerstaende_6m if x > mittel_kurs), None)
-        bear_trigger = next((x for x in supports_6m if x < mittel_kurs), None)
+        widerstaende_6m = [x for x in alle_6m_preise if x > mittel_kurs]
+        supports_6m = [x for x in alle_6m_preise if x < mittel_kurs]
+
+        # Exakt dieselbe Preis-Klassifikation wie im 6M-Chart.
+        bull_trigger = min(widerstaende_6m) if widerstaende_6m else None
+
+        # Primärer Support = nächster Support unter dem aktuellen Kurs.
+        # Tiefere Unterstützungen (3.983 / 3.958) sind Ziele, nicht Trigger.
+        bear_trigger = max(supports_6m) if supports_6m else None
 
         if bull_trigger is not None:
             mittel_bull = fmt_szenario(bull_trigger)
@@ -2332,21 +2344,19 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
         # Ziele: nächste kombinierte Reaktionszone JENSEITS des jeweiligen
         # 6M-Triggers. Diese entsprechen den zusätzlich im 6M-Chart sichtbaren
         # übergeordneten Marken (z.B. 4.786 bzw. 4.010).
-        reak_w = sorted(
-            [float(x[0]) for x in (struktur_6m_reaktionszonen or {}).get("widerstandszonen", [])]
-        )
-        reak_s = sorted(
-            [float(x[0]) for x in (struktur_6m_reaktionszonen or {}).get("supportzonen", [])],
-            reverse=True,
-        )
+        alle_reaktionspreise = sorted(set(
+            float(x[0])
+            for key in ("widerstandszonen", "supportzonen")
+            for x in (struktur_6m_reaktionszonen or {}).get(key, []) or []
+        ))
 
         if bull_trigger is not None:
-            ziel = next((x for x in reak_w if x > bull_trigger + 1e-6), None)
+            ziel = next((x for x in alle_reaktionspreise if x > bull_trigger + 1e-6), None)
             if ziel is not None:
                 mittel_ziel_bull = fmt_szenario(ziel)
 
         if bear_trigger is not None:
-            ziel = next((x for x in reak_s if x < bear_trigger - 1e-6), None)
+            ziel = next((x for x in reversed(alle_reaktionspreise) if x < bear_trigger - 1e-6), None)
             if ziel is not None:
                 mittel_ziel_baer = fmt_szenario(ziel)
 
