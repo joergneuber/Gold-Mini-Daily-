@@ -563,7 +563,7 @@ def hole_saisonalitaet_text():
     return None
 
 
-def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, mittel_szenarien=None, langfrist_formation=None):
+def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, langfrist_formation=None):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
     zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}.
     langfrist_formation: automatisch erkannte Formation des langfristigen Tagescharts.
@@ -628,21 +628,6 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, m
             szenarien_block += f", Ziel danach {szenarien['ziel_baerisch']:.2f} USD"
         szenarien_block += "\n"
 
-    mittel_szenarien = mittel_szenarien or {}
-    mittel_szenarien_block = (
-        "VERBINDLICHE MITTELFRISTIGE 6M-SZENARIO-MARKEN (EXAKT aus derselben "
-        "Berechnung wie die mittlere Karte - NICHT neu herleiten):\n"
-        f"- Bull-Trigger: {mittel_szenarien.get('bull_trigger', 'keine Zone')} USD"
-        + (f", Ziel danach: {mittel_szenarien['ziel_bullisch']} USD"
-           if mittel_szenarien.get("ziel_bullisch") else "")
-        + "\n"
-        f"- Bear-Trigger: {mittel_szenarien.get('bear_trigger', 'keine Zone')} USD"
-        + (f", Ziel danach: {mittel_szenarien['ziel_baerisch']} USD"
-           if mittel_szenarien.get("ziel_baerisch") else "")
-        + "\n"
-        f"- Neutralbereich: {mittel_szenarien.get('neutral', 'keine Zone')}"
-    )
-
     prompt = f"""Du bist ein nüchterner charttechnischer Kommentator für Gold Spot (XAU/USD).
 
 
@@ -690,7 +675,6 @@ Intraday-Daten (kurzfristig):
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
 
 {szenarien_block}
-{mittel_szenarien_block}
 {langfrist_block}
 {saison_block}
 Strukturelle Reaktionszonen (mehrfach bestätigte Hoch-/Tiefpunkte je Zeitfenster - diese
@@ -702,12 +686,12 @@ Für KURZFRISTIG / INTRADAY müssen die beiden vorgegebenen Szenario-Marken
 (Aufwärts-Trigger und Abwärts-Trigger samt Ziele) ausdrücklich genannt werden; erfinde
 keine abweichenden Trigger-Kurse.
 
-Für MITTELFRISTIG / 6M-STRUKTUR ordne die Lage ausschließlich anhand der strukturellen
-Zonen und der übergeordneten 6M-Struktur ein. Verwende keine Intraday-Pivotmarke als
-mittelfristigen Trigger, wenn dafür eine eigene 6M-Strukturmarke vorliegt. Nenne in diesem
-Satz ausdrücklich die vorgegebenen mittelfristigen 6M-Szenario-Marken (Bull-Trigger,
-Bear-Trigger und die zugehörigen Ziele) unverändert und genau wie geliefert; erfinde,
-ersetze oder verschiebe keine mittelfristige Kursmarke.
+Für MITTELFRISTIG / 6M-STRUKTUR ordne die Lage ausschließlich anhand der im Prompt
+bereitgestellten strukturellen Zonen und der übergeordneten 6M-Struktur ein. Verwende keine
+Intraday-Pivotmarke als mittelfristigen Trigger, wenn dafür eine eigene 6M-Strukturmarke
+vorliegt. Verwende keine langfristige Marke als mittelfristigen Trigger. Nenne nur
+Kursmarken, die im bereitgestellten mittelfristigen/6M-Kontext tatsächlich vorhanden sind,
+und verändere oder erfinde keine Kursmarken.
 
 Für LANGFRISTIG / POSITION ordne ausschließlich die übergeordnete Tageschart-/Positionstrading-
 Struktur ein. Wenn ein übergeordneter Abwärtskanal vorgegeben ist, muss klar zwischen
@@ -2228,61 +2212,6 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-
-def berechne_mittelfristige_szenarien(struktur_6m_daten, struktur_6m_szenario_zonen, struktur_6m_reaktionszonen):
-    """Berechnet die mittelfristigen Trigger/Ziele exakt aus der 6M-Chartlogik.
-    Diese Werte werden sowohl im HTML-Szenarioblock als auch an Gemini übergeben,
-    damit Gemini keine eigene Auswahl unter mehreren 6M-Zonen treffen muss."""
-    mittel_bull = mittel_baer = "keine Zone"
-    mittel_ziel_bull = mittel_ziel_baer = None
-
-    if struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
-        mittel_kurs = float(struktur_6m_daten["Close"].iloc[-1])
-        mittel_6m = struktur_6m_szenario_zonen or {
-            "widerstandszonen": [], "supportzonen": []
-        }
-
-        alle_6m_preise = sorted(set(
-            float(x[0])
-            for key in ("widerstandszonen", "supportzonen")
-            for x in mittel_6m.get(key, []) or []
-        ))
-        widerstaende_6m = [x for x in alle_6m_preise if x > mittel_kurs]
-        supports_6m = [x for x in alle_6m_preise if x < mittel_kurs]
-
-        bull_trigger = min(widerstaende_6m) if widerstaende_6m else None
-        bear_trigger = max(supports_6m) if supports_6m else None
-
-        if bull_trigger is not None:
-            mittel_bull = fmt_szenario(bull_trigger)
-        if bear_trigger is not None:
-            mittel_baer = fmt_szenario(bear_trigger)
-
-        alle_reaktionspreise = sorted(set(
-            float(x[0])
-            for key in ("widerstandszonen", "supportzonen")
-            for x in (struktur_6m_reaktionszonen or {}).get(key, []) or []
-        ))
-
-        if bull_trigger is not None:
-            ziel = next((x for x in alle_reaktionspreise if x > bull_trigger + 1e-6), None)
-            if ziel is not None:
-                mittel_ziel_bull = fmt_szenario(ziel)
-
-        if bear_trigger is not None:
-            ziel = next((x for x in reversed(alle_reaktionspreise) if x < bear_trigger - 1e-6), None)
-            if ziel is not None:
-                mittel_ziel_baer = fmt_szenario(ziel)
-
-    return {
-        "bull_trigger": mittel_bull,
-        "bear_trigger": mittel_baer,
-        "ziel_bullisch": mittel_ziel_bull,
-        "ziel_baerisch": mittel_ziel_baer,
-        "neutral": f"{mittel_baer} bis {mittel_bull} USD",
-    }
-
-
 def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None, struktur_6m_reaktionszonen=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
@@ -2392,19 +2321,71 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     kurz_neutral = f"{kurz_baer} bis {kurz_bull} USD"
     kurzfristig_html = szenario_zeilen(kurz_bull, kurz_ziel_bull, kurz_neutral, kurz_baer, kurz_ziel_baer)
 
-    # Mittelfristig: exakt dieselbe gemeinsame 6M-Szenarioberechnung wie
-    # diejenige, die auch Gemini als verbindliche Eingabe erhält.
-    mittel_szenarien = berechne_mittelfristige_szenarien(
-        struktur_6m_daten,
-        struktur_6m_szenario_zonen,
-        struktur_6m_reaktionszonen,
-    )
-    mittel_bull = mittel_szenarien["bull_trigger"]
-    mittel_baer = mittel_szenarien["bear_trigger"]
-    mittel_ziel_bull = mittel_szenarien["ziel_bullisch"]
-    mittel_ziel_baer = mittel_szenarien["ziel_baerisch"]
-    mittel_neutral = mittel_szenarien["neutral"]
+    # Mittelfristig: Trigger und Support kommen EXAKT aus denselben 6M-
+    # Strukturzonen wie der sichtbare 6M-Chart. Die Ziele kommen aus den
+    # bereits im Chart zusätzlich dargestellten kombinierten 3M/6M-Zonen.
+    # Dadurch bleibt die Karte semantisch sauber:
+    #   Trigger = 6M-Strukturmarke
+    #   Ziel    = nächste übergeordnete Reaktionszone
+    mittel_bull = mittel_baer = "keine Zone"
+    mittel_ziel_bull = mittel_ziel_baer = None
 
+    if struktur_6m_daten is not None and len(struktur_6m_daten) > 0:
+        mittel_kurs = float(struktur_6m_daten["Close"].iloc[-1])
+
+        # NICHT neu berechnen: exakt dasselbe 6M-Zonenobjekt verwenden,
+        # das main() bereits an den 6M-Chart übergibt.
+        mittel_6m = struktur_6m_szenario_zonen or {"widerstandszonen": [], "supportzonen": []}
+
+        # WICHTIG: Der 6M-Chart selbst klassifiziert die Strukturzonen NICHT
+        # nach dem Dict-Schlüssel, sondern nach ihrer Lage zum aktuellen Kurs:
+        #   preis > aktueller Kurs -> Widerstand
+        #   preis < aktueller Kurs -> Support
+        # Daher müssen wir für die Szenariokarte ebenfalls ALLE 6M-Zonen
+        # zusammenführen. Sonst kann z.B. 4.184 intern in "widerstandszonen"
+        # stehen, vom Chart aber korrekt als "6M-Support 4.184" beschriftet
+        # werden. Genau das war der Fehler im echten Lauf.
+        alle_6m_preise = sorted(set(
+            float(x[0])
+            for key in ("widerstandszonen", "supportzonen")
+            for x in mittel_6m.get(key, []) or []
+        ))
+
+        widerstaende_6m = [x for x in alle_6m_preise if x > mittel_kurs]
+        supports_6m = [x for x in alle_6m_preise if x < mittel_kurs]
+
+        # Exakt dieselbe Preis-Klassifikation wie im 6M-Chart.
+        bull_trigger = min(widerstaende_6m) if widerstaende_6m else None
+
+        # Primärer Support = nächster Support unter dem aktuellen Kurs.
+        # Tiefere Unterstützungen (3.983 / 3.958) sind Ziele, nicht Trigger.
+        bear_trigger = max(supports_6m) if supports_6m else None
+
+        if bull_trigger is not None:
+            mittel_bull = fmt_szenario(bull_trigger)
+        if bear_trigger is not None:
+            mittel_baer = fmt_szenario(bear_trigger)
+
+        # Ziele: nächste kombinierte Reaktionszone JENSEITS des jeweiligen
+        # 6M-Triggers. Diese entsprechen den zusätzlich im 6M-Chart sichtbaren
+        # übergeordneten Marken (z.B. 4.786 bzw. 4.010).
+        alle_reaktionspreise = sorted(set(
+            float(x[0])
+            for key in ("widerstandszonen", "supportzonen")
+            for x in (struktur_6m_reaktionszonen or {}).get(key, []) or []
+        ))
+
+        if bull_trigger is not None:
+            ziel = next((x for x in alle_reaktionspreise if x > bull_trigger + 1e-6), None)
+            if ziel is not None:
+                mittel_ziel_bull = fmt_szenario(ziel)
+
+        if bear_trigger is not None:
+            ziel = next((x for x in reversed(alle_reaktionspreise) if x < bear_trigger - 1e-6), None)
+            if ziel is not None:
+                mittel_ziel_baer = fmt_szenario(ziel)
+
+    mittel_neutral = f"{mittel_baer} bis {mittel_bull} USD"
     mittel_szenario_html = szenario_zeilen(
         mittel_bull, mittel_ziel_bull, mittel_neutral,
         mittel_baer, mittel_ziel_baer,
@@ -2997,35 +2978,38 @@ def main():
         )
         if lang_kanal is not None:
             langfrist_formation = lang_kanal.get("formation")
-    # Gemeinsame 6M-Datenquelle bereits vor Gemini bereitstellen, damit
-    # Gemini exakt dieselben mittelfristigen Trigger/Ziele erhält wie die Karte.
-    kombinierte_zonen_lang = kombiniere_zonen(
-        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, LANGFRIST_MONATE)}
-    )
-    struktur_6m_szenario_zonen = berechne_6m_strukturzonen(daily_lang) if daily_lang is not None else None
-    struktur_6m_reaktionszonen = kombinierte_zonen_lang
-    mittel_szenarien = berechne_mittelfristige_szenarien(
-        daily_lang, struktur_6m_szenario_zonen, struktur_6m_reaktionszonen
-    )
-
     economic_events_block, _ = briefing_block(days_ahead=7)
     rueckblick_text = generiere_rueckblick(
         daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien,
-        mittel_szenarien=mittel_szenarien,
         langfrist_formation=langfrist_formation,
     )
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
     kombinierte_zonen_intraday = kombiniere_zonen(zonen_je_zeitraum, referenz_preis=daten["realtime"], max_abstand_pct=5)
+    # Für den 6-Monats-Chart bewusst OHNE Preisnähe-Filter, aber nur aus den 3-/6-Monats-
+    # Fenstern (nicht 36M) - deren Zonen stammen aus Daten, die ohnehin im sichtbaren
+    # 6-Monats-Preisbereich liegen, können die Achse also nicht aufblähen. Das 36-Monats-
+    # Fenster bleibt außen vor, weil es auch Zonen aus einem ganz anderen (viel tieferen)
+    # historischen Kursniveau liefern kann.
+    kombinierte_zonen_lang = kombiniere_zonen(
+        {k: v for k, v in zonen_je_zeitraum.items() if k in (3, LANGFRIST_MONATE)}
+    )
+
     range_ausbruch_status = berechne_range_ausbruch_status()
     print(f"Range-Ausbruch-Status: {range_ausbruch_status['status']}")
 
     chart_pfad = baue_chart(daten["intraday_reihe"], pivots, strukturzonen=kombinierte_zonen_intraday,
                              range_ausbruch_status=range_ausbruch_status)
     chart_lang_pfad = None
+    # Eine gemeinsame 6M-Zonenquelle für Chart und mittelfristige Karte.
+    struktur_6m_szenario_zonen = berechne_6m_strukturzonen(daily_lang) if daily_lang is not None else None
 
     if daily_lang is not None:
         chart_lang_pfad = baue_langfrist_chart(daily_lang, kombinierte_zonen_lang, struktur_zonen=struktur_6m_szenario_zonen)
+
+    # Zusätzlich die bereits im 6M-Chart sichtbaren kombinierten 3M/6M-Zonen
+    # für die übergeordneten Szenario-Ziele weiterreichen.
+    struktur_6m_reaktionszonen = kombinierte_zonen_lang
 
     positionstrading_status = berechne_positionstrading_status()
     print(f"Positionstrading-Status: {positionstrading_status['status']}")
