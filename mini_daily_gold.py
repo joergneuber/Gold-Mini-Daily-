@@ -2413,12 +2413,6 @@ def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positi
     def fmt(n):
         return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    tages_ma_struktur = berechne_tages_ma_struktur(daily_lang) if daily_lang is not None else None
-    if tages_ma_struktur:
-        print(formatiere_tages_ma_struktur(tages_ma_struktur, lambda n: f"{n:,.2f}"))
-    else:
-        print("Tagesdaten-MA-Struktur: nicht verfügbar.")
-
     szenarien = berechne_szenarien(daten["realtime"], pivots)
     szenarien_text = formatiere_szenarien(szenarien, fmt)
 
@@ -3183,10 +3177,13 @@ def main():
 
     zonen_je_zeitraum = {}
     daily_lang = None
+    daily_ma_basis = None
     for monate in (3, LANGFRIST_MONATE, 36):
         langfrist = hole_langfrist_daten(monate=monate)
         if monate == LANGFRIST_MONATE:
             daily_lang = langfrist
+        if monate == 36:
+            daily_ma_basis = langfrist
         zonen_je_zeitraum[monate] = analysiere_reaktionszonen(langfrist) if langfrist is not None else None
         if zonen_je_zeitraum[monate]:
             print(f"Widerstandszonen ({monate}M): {zonen_je_zeitraum[monate]['widerstandszonen']}")
@@ -3196,6 +3193,19 @@ def main():
 
     szenarien = berechne_szenarien(daten["realtime"], pivots)
     intraday_zukunft = analysiere_intraday_zukunft(daten, szenarien)
+
+    # Tages-MA-Struktur für 6M / Position aus der vollständigen 36M-Tageshistorie.
+    # Die 6M-Reihe allein enthält ggf. weniger als 200 Handelstage und reicht
+    # deshalb nicht zuverlässig für einen WMA200.
+    tages_ma_struktur = (
+        berechne_tages_ma_struktur(daily_ma_basis)
+        if daily_ma_basis is not None
+        else None
+    )
+    if tages_ma_struktur:
+        print(formatiere_tages_ma_struktur(tages_ma_struktur, lambda n: f"{n:,.2f}"))
+    else:
+        print("Tagesdaten-MA-Struktur: nicht verfügbar.")
     print(formatiere_intraday_zukunft(intraday_zukunft, lambda n: f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")))
 
     # Dieselben bereits für die mittlere Karte verwendeten 6M-Strukturdaten
