@@ -408,6 +408,13 @@ def _intraday_trendinfo(df, lookback):
     x = df.copy()
     x["EMA20"] = x["Close"].ewm(span=INTRADAY_EMA_KURZ, adjust=False).mean()
     x["EMA50"] = x["Close"].ewm(span=INTRADAY_EMA_LANG, adjust=False).mean()
+    x["EMA100"] = x["Close"].ewm(span=100, adjust=False).mean()
+    x["EMA200"] = x["Close"].ewm(span=200, adjust=False).mean()
+    wma_weights = np.arange(1, 201, dtype=float)
+    wma_sum = wma_weights.sum()
+    x["WMA200"] = x["Close"].rolling(200).apply(
+        lambda v: float(np.dot(v, wma_weights) / wma_sum), raw=True
+    )
     x["ATR14"] = berechne_atr(x, INTRADAY_ATR_FENSTER)
     letzte = x.iloc[-1]
     vorher = x.iloc[-2]
@@ -415,6 +422,23 @@ def _intraday_trendinfo(df, lookback):
     close = float(letzte["Close"])
     ema20 = float(letzte["EMA20"])
     ema50 = float(letzte["EMA50"])
+    ema100 = float(letzte["EMA100"])
+    ema200 = float(letzte["EMA200"])
+    wma200 = float(letzte["WMA200"]) if pd.notna(letzte["WMA200"]) else None
+    wma200_prev = float(x["WMA200"].iloc[-6]) if len(x) >= 6 and pd.notna(x["WMA200"].iloc[-6]) else wma200
+    wma200_richtung = (
+        "steigend" if wma200 is not None and wma200_prev is not None and wma200 > wma200_prev
+        else "fallend" if wma200 is not None and wma200_prev is not None and wma200 < wma200_prev
+        else "seitwärts"
+    )
+    if wma200 is None:
+        ma_lage = "WMA200 noch nicht verfügbar"
+    elif close > ema200 and close > wma200:
+        ma_lage = "Kurs über EMA200 und WMA200"
+    elif close < ema200 and close < wma200:
+        ma_lage = "Kurs unter EMA200 und WMA200"
+    else:
+        ma_lage = "gemischte Lage um EMA200/WMA200"
     if close > ema20 and ema20 > ema50 and ema20_slope > 0:
         trend = "bullisch"
     elif close < ema20 and ema20 < ema50 and ema20_slope < 0:
@@ -444,7 +468,10 @@ def _intraday_trendinfo(df, lookback):
         elif hh or hl: struktur = "bullische Verbesserung"
         elif lh or ll: struktur = "bärische Verschlechterung"
     return {
-        "close": close, "ema20": ema20, "ema50": ema50, "atr14": atr,
+        "close": close, "ema20": ema20, "ema50": ema50,
+        "ema100": ema100, "ema200": ema200, "wma200": wma200,
+        "wma200_richtung": wma200_richtung, "ma_lage": ma_lage,
+        "atr14": atr,
         "trend": trend, "struktur": struktur, "momentum": momentum,
         "high": recent_high, "low": recent_low, "zeitpunkt": x.index[-1],
     }
@@ -487,6 +514,9 @@ def formatiere_intraday_zukunft(zukunft, fmt):
         atr = f" | ATR14 {fmt(x['atr14'])}" if x.get("atr14") else ""
         return (f"{label}: Trend {x['trend']}, Struktur {x['struktur']}, Momentum {x['momentum']}, "
                 f"Close {fmt(x['close'])}, EMA20 {fmt(x['ema20'])}, EMA50 {fmt(x['ema50'])}, "
+                f"EMA100 {fmt(x['ema100'])}, EMA200 {fmt(x['ema200'])}, "
+                f"WMA200 {fmt(x['wma200']) if x.get('wma200') is not None else 'n/a'} "
+                f"({x['wma200_richtung']}), MA-Lage {x['ma_lage']}, "
                 f"Range {fmt(x['low'])}-{fmt(x['high'])}{atr}")
     bull = f"über {fmt(zukunft['bull_trigger'])}" if zukunft.get("bull_trigger") else "kein bullischer Trigger"
     bear = f"unter {fmt(zukunft['bear_trigger'])}" if zukunft.get("bear_trigger") else "kein bärischer Trigger"
@@ -845,8 +875,8 @@ verbindlich in exakt dieser Reihenfolge auszugeben:
 3. INTRADAY 15m – genau 1 Satz. Beginne den Satz mit "Intraday 15m:" und beschreibe ausschließlich die 15m-Bestätigung bzw. den nächsten Trigger.
 4. INTRADAY SZENARIO – genau 1 Satz. Beginne den Satz mit "Intraday Szenario:" und führe die 1h/30m/15m-Informationen zu einem konkreten Bull-/Bear-/Neutral-Szenario zusammen. Nutze ausschließlich Intraday-Daten und Intraday-Marken.
 5. DAYTRADING-FOKUS – genau 1 Satz. Beginne den Satz mit "Daytrading-Fokus:" und ordne ausschließlich die nächsten Handelsstunden ein: welches Intraday-Szenario hat aktuell Priorität, welche Bestätigung bzw. welcher bereits definierte lokale Daytrading-Trigger ist entscheidend und was würde das Szenario invalidieren. Verwende ausschließlich die vorgegebenen lokalen Daytrading-Trigger und andere vorhandene Intraday-Informationen; erfinde keine neuen Kursmarken.
-6. 6M-STRUKTUR – genau 1 Satz. Beginne den Satz mit "6M:" und beschreibe ausschließlich die mittelfristige 6M-Struktur. Nutze keine reinen Intraday-Pivots.
-7. POSITION – genau 1 Satz. Beginne den Satz mit "Position:" und beschreibe ausschließlich die übergeordnete Tageschart-/Positionstrading-Struktur.
+6. 6M-STRUKTUR – genau 1 Satz. Beginne den Satz mit "6M:" und beschreibe ausschließlich die mittelfristige 6M-Struktur. Nutze keine reinen Intraday-Pivots. Beziehe die vorgegebene Tagesdaten-MA-Struktur (EMA20/50/100/200 und WMA200) ausdrücklich in die mittelfristige Einordnung ein.
+7. POSITION – genau 1 Satz. Beginne den Satz mit "Position:" und beschreibe ausschließlich die übergeordnete Tageschart-/Positionstrading-Struktur. Beziehe die vorgegebene Tagesdaten-MA-Struktur ausdrücklich ein.
 8. GESAMTBILD – genau 1 Satz. Beginne den Satz mit "Gesamtbild:" und fasse die Aussagen aus Intraday, Daytrading-Fokus, 6M und Position knapp zusammen, ohne neue Kursmarken einzuführen.
 
 Jeder Satz muss exakt seine vorgegebene Kennzeichnung verwenden. Keine zusätzlichen Sätze, Aufzählungen oder Satzfragmente. Die Reihenfolge darf nicht verändert werden. Die 1h/30m/15m-Rollen sind strikt: 1h bestimmt die Richtung, 30m das Setup, 15m die Bestätigung. Der Daytrading-Fokus kommt unmittelbar nach dem Intraday-Szenario und vor 6M/Position.
@@ -897,7 +927,7 @@ Für LANGFRISTIG / POSITION ordne ausschließlich die übergeordnete Tageschart-
 Struktur ein. Wenn ein übergeordneter Abwärtskanal vorgegeben ist, muss klar zwischen
 kurzfristiger Erholung und übergeordneter Abwärtsstruktur unterschieden werden.
 
-Für 6M und POSITION berücksichtige zusätzlich die vorgegebene Tagesdaten-MA-Struktur. EMA20/50/100/200 beschreiben die Trendstruktur; der WMA200 ist eine zentrale Schlüsselmarke. Nenne seine Lage zum Kurs und seine Richtung nur dann, wenn es für den jeweiligen Horizont relevant ist.
+Für 6M und POSITION berücksichtige zusätzlich die vorgegebene Tagesdaten-MA-Struktur. EMA20/50/100/200 beschreiben die Trendstruktur; der WMA200 ist eine zentrale Schlüsselmarke. Nenne seine Lage zum Kurs und seine Richtung für beide Horizonte ausdrücklich und ordne sie zusammen mit der jeweiligen Struktur ein. Im 6M-Satz müssen die Tages-MA-Werte in die mittelfristige Bewertung einfließen. Verwende ausschließlich die vorgegebenen Werte.
 
 Ordne die Kursbewegung dort, wo es für den jeweiligen Horizont seriös möglich ist, knapp
 einer gängigen charttechnischen Formation zu. Falls keine seriöse Formation erkennbar
