@@ -33,7 +33,7 @@ from economic_events import briefing_block
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
 INTRADAY_ANALYSE_INTERVALLE = ("1h", "30min", "15min")
-INTRADAY_ANALYSE_BARS = {"1h": 72, "30min": 96, "15min": 160}
+INTRADAY_ANALYSE_BARS = {"1h": 250, "30min": 250, "15min": 250}
 TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
