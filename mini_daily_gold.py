@@ -33,7 +33,7 @@ from economic_events import briefing_block
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
 INTRADAY_ANALYSE_INTERVALLE = ("1h", "30min", "15min")
-INTRADAY_ANALYSE_BARS = {"1h": 72, "30min": 96, "15min": 160}
+INTRADAY_ANALYSE_BARS = {"1h": 300, "30min": 300, "15min": 300}
 TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
@@ -136,6 +136,9 @@ INTRADAY_RANGE_BUCKET_USD = 6
 # Bewusst getrennt von den bestehenden Pivot-/Range-Systemen.
 INTRADAY_EMA_KURZ = 20
 INTRADAY_EMA_LANG = 50
+INTRADAY_EMA_MITTEL = 100
+INTRADAY_EMA_LANGFRIST = 200
+INTRADAY_WMA_LANGFRIST = 200
 INTRADAY_ATR_FENSTER = 14
 INTRADAY_SWING_FENSTER = 2
 INTRADAY_BREAKOUT_LOOKBACK = {"1h": 8, "30min": 8, "15min": 12}
@@ -401,13 +404,65 @@ def hole_kursdaten():
     }
 
 
+def _ma_struktur(df):
+    """Berechnet EMA20/50/100/200 und WMA200 aus einer OHLC-Zeitreihe.
+    WMA200 ist ein einfacher gewichteter gleitender Durchschnitt mit linear
+    steigenden Gewichten; nur abgeschlossene Vergangenheitsdaten werden genutzt."""
+    if df is None or len(df) < INTRADAY_WMA_LANGFRIST:
+        return None
+    close = df["Close"].astype(float)
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema100 = close.ewm(span=100, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    weights = np.arange(1, INTRADAY_WMA_LANGFRIST + 1, dtype=float)
+    wma200 = close.rolling(INTRADAY_WMA_LANGFRIST).apply(
+        lambda values: float(np.dot(values, weights) / weights.sum()), raw=True
+    )
+    i = -1
+    return {
+        "ema20": float(ema20.iloc[i]),
+        "ema50": float(ema50.iloc[i]),
+        "ema100": float(ema100.iloc[i]),
+        "ema200": float(ema200.iloc[i]),
+        "wma200": float(wma200.iloc[i]),
+        "close": float(close.iloc[i]),
+        "zeitpunkt": df.index[i],
+        "kurs_ueber_ema200": bool(close.iloc[i] > ema200.iloc[i]),
+        "kurs_ueber_wma200": bool(close.iloc[i] > wma200.iloc[i]),
+        "wma200_steigend": bool(wma200.iloc[i] > wma200.iloc[-4]) if len(wma200.dropna()) >= 4 else None,
+    }
+
+
+def _ma_trendlage_text(ma):
+    if not ma:
+        return "keine ausreichende MA-Historie"
+    c = ma["close"]
+    if c > ma["ema20"] > ma["ema50"] > ma["ema100"] > ma["ema200"]:
+        struktur = "klar aufwärtsgerichtete EMA-Struktur"
+    elif c < ma["ema20"] < ma["ema50"] < ma["ema100"] < ma["ema200"]:
+        struktur = "klar abwärtsgerichtete EMA-Struktur"
+    else:
+        struktur = "gemischte EMA-Struktur"
+    wma_lage = "über WMA200" if ma["kurs_ueber_wma200"] else "unter WMA200"
+    ema_lage = "über EMA200" if ma["kurs_ueber_ema200"] else "unter EMA200"
+    wma_trend = "steigend" if ma["wma200_steigend"] else "fallend" if ma["wma200_steigend"] is False else "nicht beurteilbar"
+    return f"{struktur}; Kurs {ema_lage} und {wma_lage}; WMA200 {wma_trend}"
+
+
 def _intraday_trendinfo(df, lookback):
-    """Ermittelt eine einfache, reproduzierbare MTF-Struktur ohne Lookahead."""
-    if df is None or len(df) < max(INTRADAY_EMA_LANG + 5, lookback + 5):
+    """Ermittelt MTF-Struktur und die MA-Trendlage ohne Lookahead."""
+    if df is None or len(df) < max(INTRADAY_WMA_LANGFRIST + 5, lookback + 5):
         return None
     x = df.copy()
-    x["EMA20"] = x["Close"].ewm(span=INTRADAY_EMA_KURZ, adjust=False).mean()
-    x["EMA50"] = x["Close"].ewm(span=INTRADAY_EMA_LANG, adjust=False).mean()
+    x["EMA20"] = x["Close"].ewm(span=20, adjust=False).mean()
+    x["EMA50"] = x["Close"].ewm(span=50, adjust=False).mean()
+    x["EMA100"] = x["Close"].ewm(span=100, adjust=False).mean()
+    x["EMA200"] = x["Close"].ewm(span=200, adjust=False).mean()
+    weights = np.arange(1, INTRADAY_WMA_LANGFRIST + 1, dtype=float)
+    x["WMA200"] = x["Close"].rolling(INTRADAY_WMA_LANGFRIST).apply(
+        lambda values: float(np.dot(values, weights) / weights.sum()), raw=True
+    )
     x["ATR14"] = berechne_atr(x, INTRADAY_ATR_FENSTER)
     letzte = x.iloc[-1]
     vorher = x.iloc[-2]
@@ -415,6 +470,9 @@ def _intraday_trendinfo(df, lookback):
     close = float(letzte["Close"])
     ema20 = float(letzte["EMA20"])
     ema50 = float(letzte["EMA50"])
+    ema100 = float(letzte["EMA100"])
+    ema200 = float(letzte["EMA200"])
+    wma200 = float(letzte["WMA200"])
     if close > ema20 and ema20 > ema50 and ema20_slope > 0:
         trend = "bullisch"
     elif close < ema20 and ema20 < ema50 and ema20_slope < 0:
@@ -443,10 +501,15 @@ def _intraday_trendinfo(df, lookback):
         elif lh and ll: struktur = "tiefere Hochs/Tiefere Tiefs"
         elif hh or hl: struktur = "bullische Verbesserung"
         elif lh or ll: struktur = "bärische Verschlechterung"
+    ma = {
+        "ema20": ema20, "ema50": ema50, "ema100": ema100, "ema200": ema200, "wma200": wma200,
+        "close": close, "kurs_ueber_ema200": close > ema200, "kurs_ueber_wma200": close > wma200,
+        "wma200_steigend": bool(wma200 > float(x["WMA200"].iloc[-4])) if pd.notna(x["WMA200"].iloc[-4]) else None,
+    }
     return {
-        "close": close, "ema20": ema20, "ema50": ema50, "atr14": atr,
-        "trend": trend, "struktur": struktur, "momentum": momentum,
-        "high": recent_high, "low": recent_low, "zeitpunkt": x.index[-1],
+        "close": close, "ema20": ema20, "ema50": ema50, "ema100": ema100, "ema200": ema200,
+        "wma200": wma200, "atr14": atr, "trend": trend, "struktur": struktur, "momentum": momentum,
+        "high": recent_high, "low": recent_low, "zeitpunkt": x.index[-1], "ma_trendlage": _ma_trendlage_text(ma),
     }
 
 
@@ -487,7 +550,8 @@ def formatiere_intraday_zukunft(zukunft, fmt):
         atr = f" | ATR14 {fmt(x['atr14'])}" if x.get("atr14") else ""
         return (f"{label}: Trend {x['trend']}, Struktur {x['struktur']}, Momentum {x['momentum']}, "
                 f"Close {fmt(x['close'])}, EMA20 {fmt(x['ema20'])}, EMA50 {fmt(x['ema50'])}, "
-                f"Range {fmt(x['low'])}-{fmt(x['high'])}{atr}")
+                f"EMA100 {fmt(x['ema100'])}, EMA200 {fmt(x['ema200'])}, WMA200 {fmt(x['wma200'])}, "
+                f"MA-Lage: {x['ma_trendlage']}, Range {fmt(x['low'])}-{fmt(x['high'])}{atr}")
     bull = f"über {fmt(zukunft['bull_trigger'])}" if zukunft.get("bull_trigger") else "kein bullischer Trigger"
     bear = f"unter {fmt(zukunft['bear_trigger'])}" if zukunft.get("bear_trigger") else "kein bärischer Trigger"
     daytrade_long = f"über {fmt(zukunft['daytrade_resistance'])}"
@@ -740,6 +804,18 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, l
             "Ein Ausbruch soll möglichst mit einem 15m-Close bestätigt werden.\n"
         )
 
+    ma_langfristig = _ma_struktur(daten.get("daily_lang")) if daten.get("daily_lang") is not None else None
+    ma_langfristig_block = ""
+    if ma_langfristig:
+        ma_langfristig_block = (
+            "Tagesdaten-MA-Struktur (gilt als gemeinsame MA-Basis für 6M und Position; "
+            "6M und Position werden getrennt interpretiert):\n"
+            f"- Close: {ma_langfristig['close']:.2f} USD | EMA20: {ma_langfristig['ema20']:.2f} | "
+            f"EMA50: {ma_langfristig['ema50']:.2f} | EMA100: {ma_langfristig['ema100']:.2f} | "
+            f"EMA200: {ma_langfristig['ema200']:.2f} | WMA200: {ma_langfristig['wma200']:.2f}\n"
+            f"- Trendlage: {_ma_trendlage_text(ma_langfristig)}\n"
+        )
+
     szenarien_block = "Bereits festgelegte Szenario-Marken (aus den Pivots abgeleitet, im Report separat als eigener Block gezeigt - NICHT selbst neu herleiten, sondern genau diese Zahlen im Text verwenden):\n"
     if szenarien["naechster_widerstand"] is not None:
         szenarien_block += f"- Aufwärts-Trigger: Ausbruch über {szenarien['naechster_widerstand']:.2f} USD"
@@ -815,6 +891,7 @@ sind aussagekräftiger für eine Formationsbewertung als die reinen Intraday-Piv
 Fenster zeigen eher aktuell relevante Zonen, längere Fenster eher übergeordnete Struktur):
 {zonen_block}
 
+{ma_langfristig_block}
 Für KURZFRISTIG / INTRADAY müssen die beiden vorgegebenen großen Szenario-Marken
 (Aufwärts-Trigger und Abwärts-Trigger samt Ziele) unverändert verwendet werden. Für den
 DAYTRADING-FOKUS gelten zusätzlich ausschließlich die ausdrücklich vorgegebenen lokalen
@@ -826,7 +903,9 @@ und keine langfristigen Marken als eigene mittelfristige Trigger oder Ziele. Ver
 erfinde keine mittelfristigen Kursmarken.
 
 Für LANGFRISTIG / POSITION ordne ausschließlich die übergeordnete Tageschart-/Positionstrading-
-Struktur ein. Wenn ein übergeordneter Abwärtskanal vorgegeben ist, muss klar zwischen
+Struktur ein. Berücksichtige dabei EMA20, EMA50, EMA100, EMA200 und WMA200 der Tagesdaten.
+Für MITTELFRISTIG / 6M berücksichtige dieselben Tagesdaten-MAs als mittelfristigen Trendkontext;
+WMA200 ist dabei ausdrücklich eine zentrale Schlüsselmarke, aber erfinde keine neue Kursmarke. Wenn ein übergeordneter Abwärtskanal vorgegeben ist, muss klar zwischen
 kurzfristiger Erholung und übergeordneter Abwärtsstruktur unterschieden werden.
 
 Ordne die Kursbewegung dort, wo es für den jeweiligen Horizont seriös möglich ist, knapp
@@ -2319,7 +2398,17 @@ def formatiere_range_ausbruch(status):
 
 
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block, intraday_zukunft=None):
+def formatiere_ma_struktur(ma, fmt):
+    if not ma:
+        return "Nicht verfügbar (zu wenig Tagesdaten für EMA/WMA200)."
+    return (
+        f"Close {fmt(ma['close'])} USD | EMA20 {fmt(ma['ema20'])} | EMA50 {fmt(ma['ema50'])} | "
+        f"EMA100 {fmt(ma['ema100'])} | EMA200 {fmt(ma['ema200'])} | WMA200 {fmt(ma['wma200'])}\n"
+        f"Trendlage: {_ma_trendlage_text(ma)}"
+    )
+
+
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block, intraday_zukunft=None, ma_langfristig=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2382,6 +2471,9 @@ UNTERSTUETZUNGEN (INTRADAY)
 INTRADAY-ZUKUNFTSANALYSE (1h / 30m / 15m)
 {formatiere_intraday_zukunft(intraday_zukunft, fmt)}
 
+MA-TRENDSTRUKTUR (6M / POSITION, TAGESDATEN)
+{formatiere_ma_struktur(ma_langfristig, fmt)}
+
 REALTIME INDIKATION
 {fmt(daten['realtime'])} USD
 
@@ -2409,7 +2501,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None, struktur_6m_reaktionszonen=None, mittelfristige_szenarien=None, intraday_zukunft=None):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None, struktur_6m_reaktionszonen=None, mittelfristige_szenarien=None, intraday_zukunft=None, ma_langfristig=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2672,6 +2764,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:22px;">Intraday-Zukunftsanalyse · Daytrading</h3>
     <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:14px 16px;line-height:1.55;white-space:pre-line;">{formatiere_intraday_zukunft(intraday_zukunft, fmt)}</div>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:22px;">MA-Trendstruktur · 6M / Position</h3>
+    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:14px 16px;line-height:1.55;white-space:pre-line;">{formatiere_ma_struktur(ma_langfristig, fmt)}</div>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:22px;">Rückblick</h3>
     <p style="line-height:1.6;">{rueckblick_text}</p>
@@ -3139,6 +3234,7 @@ def main():
         if lang_kanal is not None:
             langfrist_formation = lang_kanal.get("formation")
     economic_events_block, _ = briefing_block(days_ahead=7)
+    daten["daily_lang"] = daily_lang
     rueckblick_text = generiere_rueckblick(
         daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien,
         langfrist_formation=langfrist_formation,
@@ -3184,9 +3280,11 @@ def main():
         chart_pfad, chart_tages_pfad, positionstrading_status,
         range_ausbruch_status, economic_events_block, zonen_je_zeitraum,
         daily_lang, daily_fuer_tageschart, struktur_6m_szenario_zonen,
-        struktur_6m_reaktionszonen, mittelfristige_szenarien, intraday_zukunft
+        struktur_6m_reaktionszonen, mittelfristige_szenarien, intraday_zukunft,
+        _ma_struktur(daily_lang) if daily_lang is not None else None
     )
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block, intraday_zukunft)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block, intraday_zukunft,
+                     _ma_struktur(daily_lang) if daily_lang is not None else None)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
