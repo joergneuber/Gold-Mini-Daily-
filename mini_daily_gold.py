@@ -32,6 +32,8 @@ from economic_events import briefing_block
 
 TICKER = "XAU/USD"  # Spot Gold über Twelve Data.
 INTRADAY_INTERVALL = "1h"
+INTRADAY_ANALYSE_INTERVALLE = ("1h", "30min", "15min")
+INTRADAY_ANALYSE_BARS = {"1h": 72, "30min": 96, "15min": 160}
 TWELVEDATA_BASIS_URL = "https://api.twelvedata.com/time_series"
 SEITWAERTS_SCHWELLE_PROZENT = 0.15  # +/- Band um Vortagesschluss für "Seitwärts"
 
@@ -129,6 +131,14 @@ INTRADAY_KANAL_FENSTER = 3
 INTRADAY_KANAL_MIN_PUNKTE = 2
 INTRADAY_RANGE_FENSTER = 4
 INTRADAY_RANGE_BUCKET_USD = 6
+
+# Daytrading-Zukunftsanalyse: 1h = Richtung, 30m = Setup, 15m = Trigger/Bestätigung.
+# Bewusst getrennt von den bestehenden Pivot-/Range-Systemen.
+INTRADAY_EMA_KURZ = 20
+INTRADAY_EMA_LANG = 50
+INTRADAY_ATR_FENSTER = 14
+INTRADAY_SWING_FENSTER = 2
+INTRADAY_BREAKOUT_LOOKBACK = {"1h": 8, "30min": 8, "15min": 12}
 
 
 def berechne_atr(daten, fenster):
@@ -337,8 +347,10 @@ def hole_zeitreihe_taeglich(outputsize=None, start_date=None, end_date=None):
 
 
 def hole_kursdaten():
-    """Liefert Realtime-Kurs, Vortages-OHLC und eine Intraday-Kursreihe (1h) für den Chart."""
-    intraday = hole_zeitreihe(INTRADAY_INTERVALL, outputsize=72)  # ~3 Tage Puffer bei 1h
+    """Liefert Realtime-Kurs, Vortages-OHLC sowie 1h/30m/15m-Daten für Chart und Daytrading-Analyse."""
+    intraday = hole_zeitreihe(INTRADAY_INTERVALL, outputsize=INTRADAY_ANALYSE_BARS["1h"])
+    intraday_30m = hole_zeitreihe("30min", outputsize=INTRADAY_ANALYSE_BARS["30min"])
+    intraday_15m = hole_zeitreihe("15min", outputsize=INTRADAY_ANALYSE_BARS["15min"])
     if intraday.empty:
         raise RuntimeError("Keine Intraday-Daten von Twelve Data erhalten (XAU/USD).")
 
@@ -384,7 +396,105 @@ def hole_kursdaten():
         "prev_low": prev_low,
         "prev_close": prev_close,
         "intraday_reihe": intraday,
+        "intraday_30m": intraday_30m,
+        "intraday_15m": intraday_15m,
     }
+
+
+def _intraday_trendinfo(df, lookback):
+    """Ermittelt eine einfache, reproduzierbare MTF-Struktur ohne Lookahead."""
+    if df is None or len(df) < max(INTRADAY_EMA_LANG + 5, lookback + 5):
+        return None
+    x = df.copy()
+    x["EMA20"] = x["Close"].ewm(span=INTRADAY_EMA_KURZ, adjust=False).mean()
+    x["EMA50"] = x["Close"].ewm(span=INTRADAY_EMA_LANG, adjust=False).mean()
+    x["ATR14"] = berechne_atr(x, INTRADAY_ATR_FENSTER)
+    letzte = x.iloc[-1]
+    vorher = x.iloc[-2]
+    ema20_slope = float(letzte["EMA20"] - x["EMA20"].iloc[-4])
+    close = float(letzte["Close"])
+    ema20 = float(letzte["EMA20"])
+    ema50 = float(letzte["EMA50"])
+    if close > ema20 and ema20 > ema50 and ema20_slope > 0:
+        trend = "bullisch"
+    elif close < ema20 and ema20 < ema50 and ema20_slope < 0:
+        trend = "bärisch"
+    else:
+        trend = "neutral"
+    recent = x.iloc[-lookback:]
+    recent_high = float(recent["High"].max())
+    recent_low = float(recent["Low"].min())
+    atr = float(letzte["ATR14"]) if pd.notna(letzte["ATR14"]) else None
+    momentum = "steigend" if close > float(vorher["Close"]) else "fallend" if close < float(vorher["Close"]) else "unverändert"
+    swing_highs, swing_lows = [], []
+    closes = x["Close"]
+    f = INTRADAY_SWING_FENSTER
+    for i in range(f, len(x) - f):
+        v = float(closes.iloc[i])
+        if v >= float(closes.iloc[i-f:i+f+1].max()): swing_highs.append(v)
+        if v <= float(closes.iloc[i-f:i+f+1].min()): swing_lows.append(v)
+    struktur = "neutral"
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        hh = swing_highs[-1] > swing_highs[-2]
+        hl = swing_lows[-1] > swing_lows[-2]
+        lh = swing_highs[-1] < swing_highs[-2]
+        ll = swing_lows[-1] < swing_lows[-2]
+        if hh and hl: struktur = "höhere Hochs/Höhere Tiefs"
+        elif lh and ll: struktur = "tiefere Hochs/Tiefere Tiefs"
+        elif hh or hl: struktur = "bullische Verbesserung"
+        elif lh or ll: struktur = "bärische Verschlechterung"
+    return {
+        "close": close, "ema20": ema20, "ema50": ema50, "atr14": atr,
+        "trend": trend, "struktur": struktur, "momentum": momentum,
+        "high": recent_high, "low": recent_low, "zeitpunkt": x.index[-1],
+    }
+
+
+def analysiere_intraday_zukunft(daten, szenarien):
+    """1h Richtung, 30m Setup, 15m Bestätigung; nur konditionale Szenarien."""
+    frames = {
+        "1h": _intraday_trendinfo(daten.get("intraday_reihe"), INTRADAY_BREAKOUT_LOOKBACK["1h"]),
+        "30m": _intraday_trendinfo(daten.get("intraday_30m"), INTRADAY_BREAKOUT_LOOKBACK["30min"]),
+        "15m": _intraday_trendinfo(daten.get("intraday_15m"), INTRADAY_BREAKOUT_LOOKBACK["15min"]),
+    }
+    if any(v is None for v in frames.values()):
+        return {"status": "nicht_genug_daten", "frames": frames}
+    gewicht = {"1h": 2, "30m": 2, "15m": 1}
+    score = sum(gewicht[k] * (1 if frames[k]["trend"] == "bullisch" else -1 if frames[k]["trend"] == "bärisch" else 0) for k in frames)
+    bias = "bullisch" if score >= 3 else "bärisch" if score <= -3 else "neutral / gemischt"
+    f30, f15 = frames["30m"], frames["15m"]
+    if f30["trend"] == "bullisch" and f15["trend"] == "bullisch": setup = "bullische Fortsetzung"
+    elif f30["trend"] == "bärisch" and f15["trend"] == "bärisch": setup = "bärische Fortsetzung"
+    elif f30["trend"] == "bullisch" and f15["trend"] == "bärisch": setup = "Pullback / kurzfristige Gegenbewegung"
+    elif f30["trend"] == "bärisch" and f15["trend"] == "bullisch": setup = "Erholung innerhalb der Abwärtsstruktur"
+    else: setup = "Range / unklare Struktur"
+    return {
+        "status": "ok", "frames": frames, "bias": bias, "score": score,
+        "setup": setup, "bull_trigger": szenarien.get("naechster_widerstand"),
+        "bear_trigger": szenarien.get("naechster_support"),
+        "bull_confirm": f30["trend"] == "bullisch" and f15["trend"] == "bullisch",
+        "bear_confirm": f30["trend"] == "bärisch" and f15["trend"] == "bärisch",
+    }
+
+
+def formatiere_intraday_zukunft(zukunft, fmt):
+    if not zukunft or zukunft.get("status") != "ok":
+        return "INTRADAY-ZUKUNFTSANALYSE: nicht genug 1h/30m/15m-Daten vorhanden."
+    f = zukunft["frames"]
+    def zeile(label, x):
+        atr = f" | ATR14 {fmt(x['atr14'])}" if x.get("atr14") else ""
+        return (f"{label}: Trend {x['trend']}, Struktur {x['struktur']}, Momentum {x['momentum']}, "
+                f"Close {fmt(x['close'])}, EMA20 {fmt(x['ema20'])}, EMA50 {fmt(x['ema50'])}, "
+                f"Range {fmt(x['low'])}-{fmt(x['high'])}{atr}")
+    bull = f"über {fmt(zukunft['bull_trigger'])}" if zukunft.get("bull_trigger") else "kein bullischer Trigger"
+    bear = f"unter {fmt(zukunft['bear_trigger'])}" if zukunft.get("bear_trigger") else "kein bärischer Trigger"
+    return "\n".join([
+        f"INTRADAY-ZUKUNFTSANALYSE | Bias: {zukunft['bias']} | Setup: {zukunft['setup']} | MTF-Score: {zukunft['score']:+d}",
+        zeile("1h", f["1h"]), zeile("30m", f["30m"]), zeile("15m", f["15m"]),
+        f"Bullisches Szenario: {bull} + 30m/15m-Bestätigung={zukunft['bull_confirm']}; Ziel gemäß bestehendem Pivot-Szenario.",
+        f"Bärisches Szenario: {bear} + 30m/15m-Bestätigung={zukunft['bear_confirm']}; Ziel gemäß bestehendem Pivot-Szenario.",
+        "Neutral/kein Trade: bei gemischter 15m/30m-Struktur keine Richtungsbestätigung erzwingen.",
+    ])
 
 
 def hole_langfrist_daten(monate=36):
@@ -563,7 +673,7 @@ def hole_saisonalitaet_text():
     return None
 
 
-def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, langfrist_formation=None, mittelfristige_szenarien=None):
+def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, langfrist_formation=None, mittelfristige_szenarien=None, intraday_zukunft=None):
     """Ruft Gemini auf, um einen kurzen charttechnischen Rückblick-Text zu erzeugen.
     zonen_je_zeitraum: dict {monate: reaktionszonen-dict oder None}, z.B. {3: {...}, 6: {...}, 36: {...}}.
     langfrist_formation: automatisch erkannte Formation des langfristigen Tagescharts.
@@ -645,22 +755,20 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, l
     - Die vom Programm gelieferten Kursmarken sind verbindlich. Erfinde,
       verändere oder verschiebe keine Kursmarken.
 
-Schreibe einen kompakten charttechnischen Ausblick in GENAU 6 Sätzen,
-deutsch, sachlich, ohne Anrede und ohne Kauf-/Verkaufsempfehlung. Die 6 Sätze sind
-verbindlich auf die drei Zeithorizonte aufzuteilen:
+Schreibe einen detaillierteren charttechnischen Ausblick in GENAU 8 Sätzen,
+deutsch, sachlich, ohne Anrede und ohne Kauf-/Verkaufsempfehlung. Die 8 Sätze sind
+verbindlich in exakt dieser Reihenfolge auszugeben:
 
-1. KURZFRISTIG / INTRADAY – genau 2 Sätze. Horizont: heute bzw. nächste Handelsstunden.
-   Nutze ausschließlich die Intraday-Daten und Intraday-Marken für diese beiden Sätze.
-2. MITTELFRISTIG / 6M-STRUKTUR – genau 1 Satz. Horizont: mehrere Wochen bis einige Monate.
-   Nutze hierfür die strukturellen Zonen der längeren Zeitfenster und die übergeordnete
-   6M-Struktur, nicht die reinen Intraday-Pivots.
-3. LANGFRISTIG / POSITION – genau 1 Satz. Horizont: mehrere Monate bis langfristig.
-   Nutze hierfür ausschließlich die übergeordnete Tageschart-/Positionstrading-Struktur.
-4. FAZIT – genau 2 Sätze. Beide Sätze beginnen mit "Fazit:" und fassen die drei Horizonte
-   getrennt und knapp zusammen.
+1. INTRADAY 1h – genau 1 Satz. Beginne den Satz mit "Intraday 1h:" und beschreibe ausschließlich die übergeordnete Intraday-Richtung aus der 1h-Struktur.
+2. INTRADAY 30m – genau 1 Satz. Beginne den Satz mit "Intraday 30m:" und beschreibe ausschließlich das kurzfristige Setup aus der 30m-Struktur.
+3. INTRADAY 15m – genau 1 Satz. Beginne den Satz mit "Intraday 15m:" und beschreibe ausschließlich die 15m-Bestätigung bzw. den nächsten Trigger.
+4. INTRADAY SZENARIO – genau 1 Satz. Beginne den Satz mit "Intraday Szenario:" und führe die 1h/30m/15m-Informationen zu einem konkreten Bull-/Bear-/Neutral-Szenario zusammen. Nutze ausschließlich Intraday-Daten und Intraday-Marken.
+5. DAYTRADING-FOKUS – genau 1 Satz. Beginne den Satz mit "Daytrading-Fokus:" und ordne ausschließlich die nächsten Handelsstunden ein: welches Intraday-Szenario hat aktuell Priorität, welche Bestätigung bzw. welcher bereits definierte Trigger ist entscheidend und was würde das Szenario invalidieren. Verwende ausschließlich vorhandene Intraday-Informationen und keine neuen Kursmarken.
+6. 6M-STRUKTUR – genau 1 Satz. Beginne den Satz mit "6M:" und beschreibe ausschließlich die mittelfristige 6M-Struktur. Nutze keine reinen Intraday-Pivots.
+7. POSITION – genau 1 Satz. Beginne den Satz mit "Position:" und beschreibe ausschließlich die übergeordnete Tageschart-/Positionstrading-Struktur.
+8. GESAMTBILD – genau 1 Satz. Beginne den Satz mit "Gesamtbild:" und fasse die Aussagen aus Intraday, Daytrading-Fokus, 6M und Position knapp zusammen, ohne neue Kursmarken einzuführen.
 
-Jeder Satz des Ausblicks muss durch seine Kennzeichnung eindeutig einem Zeithorizont
-zugeordnet sein. Vermische keine Marken oder Aussagen verschiedener Zeithorizonte.
+Jeder Satz muss exakt seine vorgegebene Kennzeichnung verwenden. Keine zusätzlichen Sätze, Aufzählungen oder Satzfragmente. Die Reihenfolge darf nicht verändert werden. Die 1h/30m/15m-Rollen sind strikt: 1h bestimmt die Richtung, 30m das Setup, 15m die Bestätigung. Der Daytrading-Fokus kommt unmittelbar nach dem Intraday-Szenario und vor 6M/Position.
 
 
 Intraday-Daten (kurzfristig):
@@ -673,6 +781,8 @@ Intraday-Daten (kurzfristig):
 - Tendenz zum Vortagesschluss: {tendenz}
 - Intraday-Pivot-Widerstände: {', '.join(f'{v:.0f}' for v in pivots['r'])} USD
 - Intraday-Pivot-Unterstützungen: {', '.join(f'{v:.0f}' for v in pivots['s'])} USD
+
+{formatiere_intraday_zukunft(intraday_zukunft, lambda n: f'{n:.2f}') if intraday_zukunft else 'Keine MTF-Intradayanalyse verfügbar.'}
 
 {szenarien_block}
 Mittelfristige Szenario-Ergebnisse aus der mittleren Karte (VERBINDLICH, bereits vom Programm berechnet):
@@ -708,9 +818,9 @@ einer gängigen charttechnischen Formation zu. Falls keine seriöse Formation er
 ist, sage das statt zu spekulieren. Saisonaler Kontext darf nur ergänzend erwähnt werden.
 
 
-Die zwei Fazit-Sätze sind Teil der exakt 6 Sätze und dürfen keine neuen Kursmarken
-einführen. Sie müssen die Aussagen der drei Zeithorizonte nur zusammenfassen und klar
-kennzeichnen, auf welchen Horizont sie sich beziehen."""
+Die Sätze 5 und 8 sind Teil der exakt 8 Sätze und dürfen keine neuen Kursmarken
+einführen. Satz 5 konzentriert sich ausschließlich auf die nächsten Handelsstunden; Satz 8
+fasst am Ende alle Horizonte zum Gesamtbild zusammen."""
 
     # Gemini-Fallback: bei temporaeren API-/Ueberlastungsfehlern werden
     # mehrere verfuegbare Modelle nacheinander versucht. Pro Modell maximal
@@ -2193,7 +2303,7 @@ def formatiere_range_ausbruch(status):
 
 
 
-def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block):
+def baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block, intraday_zukunft=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2253,6 +2363,9 @@ WIDERSTAENDE (INTRADAY)
 UNTERSTUETZUNGEN (INTRADAY)
 {liste(pivots['s'])} USD
 
+INTRADAY-ZUKUNFTSANALYSE (1h / 30m / 15m)
+{formatiere_intraday_zukunft(intraday_zukunft, fmt)}
+
 REALTIME INDIKATION
 {fmt(daten['realtime'])} USD
 
@@ -2280,7 +2393,7 @@ Kein Kauf-/Verkaufssignal - reine charttechnische Orientierung - Datenquelle: Tw
     return text
 
 
-def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None, struktur_6m_reaktionszonen=None, mittelfristige_szenarien=None):
+def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_dateiname, chart_tages_dateiname, positionstrading_status, range_ausbruch_status, economic_events_block, zonen_je_zeitraum, struktur_6m_daten=None, positionstrading_daten=None, struktur_6m_szenario_zonen=None, struktur_6m_reaktionszonen=None, mittelfristige_szenarien=None, intraday_zukunft=None):
     jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
     heute = deutsches_datum(jetzt)
     erstellt_zeit = jetzt.strftime("%d.%m. %H:%M")
@@ -2540,6 +2653,9 @@ def baue_html(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, chart_
     </td>
     </tr>
     </table>
+
+    <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:22px;">Intraday-Zukunftsanalyse · Daytrading</h3>
+    <div style="background:#1c1712;border:1px solid #3a3226;border-radius:6px;padding:14px 16px;line-height:1.55;white-space:pre-line;">{formatiere_intraday_zukunft(intraday_zukunft, fmt)}</div>
 
     <h3 style="color:#a89d87;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:22px;">Rückblick</h3>
     <p style="line-height:1.6;">{rueckblick_text}</p>
@@ -2982,6 +3098,8 @@ def main():
             print(f"Keine ausreichenden Daten für {monate}-Monats-Zonen.")
 
     szenarien = berechne_szenarien(daten["realtime"], pivots)
+    intraday_zukunft = analysiere_intraday_zukunft(daten, szenarien)
+    print(formatiere_intraday_zukunft(intraday_zukunft, lambda n: f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")))
 
     # Dieselben bereits für die mittlere Karte verwendeten 6M-Strukturdaten
     # vor dem Gemini-Aufruf bereitstellen, damit Gemini exakt diese Ergebnisse
@@ -3009,6 +3127,7 @@ def main():
         daten, pivots, tendenz_label, zonen_je_zeitraum, szenarien,
         langfrist_formation=langfrist_formation,
         mittelfristige_szenarien=mittelfristige_szenarien,
+        intraday_zukunft=intraday_zukunft,
     )
     # Zwei getrennte Toleranzen: der Intraday-Chart soll nur wirklich naheliegende
     # Struktur-Level zeigen (enger Zeithorizont), der 4-Monats-Chart darf großzügiger sein.
@@ -3049,9 +3168,9 @@ def main():
         chart_pfad, chart_tages_pfad, positionstrading_status,
         range_ausbruch_status, economic_events_block, zonen_je_zeitraum,
         daily_lang, daily_fuer_tageschart, struktur_6m_szenario_zonen,
-        struktur_6m_reaktionszonen, mittelfristige_szenarien
+        struktur_6m_reaktionszonen, mittelfristige_szenarien, intraday_zukunft
     )
-    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block)
+    text = baue_text(daten, pivots, tendenz_label, tendenz_pct, rueckblick_text, positionstrading_status, range_ausbruch_status, economic_events_block, intraday_zukunft)
 
     with open("mini_daily_gold.html", "w", encoding="utf-8") as f:
         f.write(html)
