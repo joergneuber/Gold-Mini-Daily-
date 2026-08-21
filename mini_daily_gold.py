@@ -2389,7 +2389,7 @@ def formatiere_range_ausbruch(status):
         stufe_text = {0: "noch kein Ziel erreicht", 1: "TP1 erreicht, Stop auf Breakeven",
                       2: "TP2 erreicht, Stop wird laufend nachgezogen"}[status["stufe"]]
         kontext = (
-            f"Simulierte Position seit {status['einstieg_zeit'].strftime('%d.%m.%Y %H:%M')} UTC OFFEN "
+            f"Simulierte Position seit {status['einstieg_zeit'].astimezone(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')} Uhr OFFEN "
             f"({status['haltedauer_stunden']:.0f} Std.). Einstieg {de_zahl(status['einstieg'])} USD, "
             f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
             f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD, TP2 {de_zahl(status['tp2'])} USD "
