@@ -10,8 +10,14 @@ on:
     # heraus, welcher der beiden Saetze gerade zutrifft. Ergebnis: der Report
     # laeuft ganzjaehrig zu denselben 7 Berliner Uhrzeiten, unabhaengig von
     # Sommer-/Winterzeit.
-    - cron: "0 3,4,6,7,9,10,12,13 * * 1-5"
-    - cron: "30 14,15,17,18,20,21 * * 1-5"
+    - cron: "0 3 * * 1-5"
+    - cron: "30 5 * * 1-5"
+    - cron: "0 8 * * 1-5"
+    - cron: "45 10 * * 1-5"
+    - cron: "0 12 * * 1-5"
+    - cron: "30 14 * * 1-5"
+    - cron: "0 17 * * 1-5"
+    - cron: "30 18 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
@@ -33,8 +39,8 @@ jobs:
           jetzt_m=$(TZ=Europe/Berlin date +%-M)
           jetzt_gesamt=$((jetzt_h * 60 + jetzt_m))
           # Zielzeiten in Minuten seit Mitternacht (Europe/Berlin):
-          # 05:00, 08:00, 11:00, 14:00, 16:30, 19:30, 22:30
-          ziele="300 480 660 840 990 1170 1350"
+          # 05:00, 07:30, 10:00, 12:45, 14:00, 16:30, 19:00, 20:30
+          ziele="300 450 600 765 840 990 1140 1230"
           soll=false
           for ziel in $ziele; do
             diff=$((jetzt_gesamt - ziel))
