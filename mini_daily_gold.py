@@ -478,7 +478,7 @@ def _intraday_trendinfo(df, lookback):
 
 
 def analysiere_intraday_zukunft(daten, szenarien):
-    """1h Richtung, 30m Setup, 15m Bestätigung; nur konditionale Szenarien."""
+    """1h Richtung, 30m Setup, 15m kurzfristige Entwicklung; nur konditionale Szenarien."""
     frames = {
         "1h": _intraday_trendinfo(daten.get("intraday_reihe"), INTRADAY_BREAKOUT_LOOKBACK["1h"]),
         "30m": _intraday_trendinfo(daten.get("intraday_30m"), INTRADAY_BREAKOUT_LOOKBACK["30min"]),
@@ -510,25 +510,24 @@ def formatiere_intraday_zukunft(zukunft, fmt):
     if not zukunft or zukunft.get("status") != "ok":
         return "INTRADAY-ZUKUNFTSANALYSE: nicht genug 1h/30m/15m-Daten vorhanden."
     f = zukunft["frames"]
-    def zeile(label, x):
-        atr = f" | ATR14 {fmt(x['atr14'])}" if x.get("atr14") else ""
-        return (f"{label}: Trend {x['trend']}, Struktur {x['struktur']}, Momentum {x['momentum']}, "
-                f"Close {fmt(x['close'])}, EMA20 {fmt(x['ema20'])}, EMA50 {fmt(x['ema50'])}, "
-                f"EMA100 {fmt(x['ema100'])}, EMA200 {fmt(x['ema200'])}, "
-                f"WMA200 {fmt(x['wma200']) if x.get('wma200') is not None else 'n/a'} "
-                f"({x['wma200_richtung']}), MA-Lage {x['ma_lage']}, "
-                f"Range {fmt(x['low'])}-{fmt(x['high'])}{atr}")
+
+    def zeile(label, rolle, x):
+        return (f"{label} – {rolle}: "
+                f"{x['trend'].capitalize()} | Struktur {x['struktur']} | "
+                f"Momentum {x['momentum']} | Durchschnittslinien: {x['ma_lage']}")
+
     bull = f"über {fmt(zukunft['bull_trigger'])}" if zukunft.get("bull_trigger") else "kein bullischer Trigger"
     bear = f"unter {fmt(zukunft['bear_trigger'])}" if zukunft.get("bear_trigger") else "kein bärischer Trigger"
     daytrade_long = f"über {fmt(zukunft['daytrade_resistance'])}"
     daytrade_short = f"unter {fmt(zukunft['daytrade_support'])}"
     return "\n".join([
-        f"INTRADAY-ZUKUNFTSANALYSE | Bias: {zukunft['bias']} | Setup: {zukunft['setup']} | MTF-Score: {zukunft['score']:+d}",
-        zeile("1h", f["1h"]), zeile("30m", f["30m"]), zeile("15m", f["15m"]),
-        f"Bullisches Szenario: {bull} + 30m/15m-Bestätigung={zukunft['bull_confirm']}; Ziel gemäß bestehendem Pivot-Szenario.",
-        f"Bärisches Szenario: {bear} + 30m/15m-Bestätigung={zukunft['bear_confirm']}; Ziel gemäß bestehendem Pivot-Szenario.",
-        f"Daytrading-Trigger: Long {daytrade_long} | Short {daytrade_short} | Ausbruch möglichst mit 15m-Close bestätigen; diese Trigger ersetzen NICHT die großen Pivot-Szenario-Marken.",
-        "Neutral/kein Trade: bei gemischter 15m/30m-Struktur keine Richtungsbestätigung erzwingen.",
+        f"INTRADAY-ZUKUNFTSANALYSE | Gesamtbild: {zukunft['bias']} | Erwartung: {zukunft['setup']} | MTF-Score: {zukunft['score']:+d}",
+        zeile("1h", "übergeordnete Richtung", f["1h"]),
+        zeile("30m", "aktuelles Setup", f["30m"]),
+        zeile("15m", "kurzfristige Entwicklung", f["15m"]),
+        f"Szenarien: Bullisch: {bull} mit Bestätigung auf 30m und 15m | Bärisch: {bear} mit Bestätigung auf 30m und 15m | Ziel gemäß bestehendem Pivot-Szenario.",
+        f"Daytrading: Long {daytrade_long} | Short {daytrade_short}",
+        "Neutral: Wenn 15m und 30m unterschiedliche Signale zeigen, keine Richtung erzwingen.",
     ])
 
 
@@ -823,7 +822,6 @@ def generiere_rueckblick(daten, pivots, tendenz, zonen_je_zeitraum, szenarien, l
             f"Lokale Daytrading-Trigger (nur für die nächsten Handelsstunden, NICHT die großen Pivot-Szenario-Marken): "
             f"Long über {intraday_zukunft['daytrade_resistance']:.2f} USD | "
             f"Short unter {intraday_zukunft['daytrade_support']:.2f} USD. "
-            "Ein Ausbruch soll möglichst mit einem 15m-Close bestätigt werden.\n"
         )
 
     tages_ma_block = (
