@@ -279,8 +279,9 @@ def hole_zeitreihe(interval, outputsize=None, start_date=None, end_date=None, ma
     DataFrame mit DatetimeIndex (Spalten Open/High/Low/Close, aufsteigend
     sortiert) - drop-in-Ersatz für die frühere yfinance-.history()-Nutzung.
 
-    Bei HTTP 429 (Rate-Limit, 8 Credits/Minute auf diesem Tarif) wird bis zu
-    max_versuche mal mit Wartezeit erneut versucht statt sofort abzubrechen -
+    Bei HTTP 429 (Rate-Limit) sowie temporären Server-/Gateway-Fehlern
+    (500, 502, 503, 504, 522) wird bis zu max_versuche mal mit Wartezeit
+    erneut versucht statt sofort abzubrechen -
     ein einzelner Report-Lauf braucht mittlerweile ~8-9 Anfragen (V1e- UND
     Range-Ausbruch-Signal, drei Reaktionszonen-Fenster, Tages-/Intraday-Basis)
     und lief deshalb ohne diese Behandlung gelegentlich ins Limit (Befund
@@ -300,13 +301,32 @@ def hole_zeitreihe(interval, outputsize=None, start_date=None, end_date=None, ma
         if end_date:
             params["end_date"] = end_date
 
-        antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=20)
+        try:
+            antwort = requests.get(TWELVEDATA_BASIS_URL, params=params, timeout=60)
+        except requests.RequestException as exc:
+            if versuch < max_versuche:
+                wartezeit = 10 * (2 ** (versuch - 1))
+                print(f"  Netzwerkfehler bei Twelve-Data-Anfrage ({interval}, Versuch {versuch}/{max_versuche}): "
+                      f"{exc} - warte {wartezeit}s und versuche es erneut...")
+                time.sleep(wartezeit)
+                continue
+            raise
+
         if antwort.status_code == 429:
             wartezeit = 65
             print(f"  Rate-Limit bei Twelve-Data-Anfrage ({interval}, Versuch {versuch}/{max_versuche}) - "
                   f"warte {wartezeit}s und versuche es erneut...")
             time.sleep(wartezeit)
             continue
+
+        if antwort.status_code in (500, 502, 503, 504, 522):
+            if versuch < max_versuche:
+                wartezeit = 10 * (2 ** (versuch - 1))
+                print(f"  Temporärer Twelve-Data-Serverfehler HTTP {antwort.status_code} "
+                      f"({interval}, Versuch {versuch}/{max_versuche}) - "
+                      f"warte {wartezeit}s und versuche es erneut...")
+                time.sleep(wartezeit)
+                continue
 
         antwort.raise_for_status()
         daten = antwort.json()
