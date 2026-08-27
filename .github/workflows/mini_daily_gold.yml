@@ -2,61 +2,19 @@ name: Mini Daily Gold
 
 on:
   schedule:
-    # GitHub Actions kennt nur UTC-Cron, keine Zeitzonen. Deshalb wird hier
-    # die Vereinigung aus Winter- (CET, UTC+1) und Sommerzeit (CEST, UTC+2)
-    # der gewuenschten Berliner Zielzeiten (05:00/08:00/11:00/14:00/16:30/
-    # 19:30/22:30) angemeldet - der Job "zeitzonen_check" unten filtert dann
-    # zur Laufzeit anhand der TATSAECHLICHEN aktuellen Berliner Uhrzeit
-    # heraus, welcher der beiden Saetze gerade zutrifft. Ergebnis: der Report
-    # laeuft ganzjaehrig zu denselben 7 Berliner Uhrzeiten, unabhaengig von
-    # Sommer-/Winterzeit.
-    - cron: "0 3 * * 1-5"
-    - cron: "30 5 * * 1-5"
-    - cron: "0 8 * * 1-5"
-    - cron: "45 10 * * 1-5"
-    - cron: "0 12 * * 1-5"
-    - cron: "30 14 * * 1-5"
-    - cron: "0 17 * * 1-5"
-    - cron: "30 18 * * 1-5"
+    # Automatische Starts in Europe/Berlin. GitHub beruecksichtigt damit
+    # Sommer-/Winterzeit automatisch. Die bestehende Code-Logik bleibt
+    # unveraendert: 05:00, 07:30, 10:00, 12:45, 14:00, 16:30, 19:00, 20:30.
+    - cron: "0 5,10,14,19 * * 1-5"
+      timezone: "Europe/Berlin"
+    - cron: "30 7,16,20 * * 1-5"
+      timezone: "Europe/Berlin"
+    - cron: "45 12 * * 1-5"
+      timezone: "Europe/Berlin"
   workflow_dispatch: {}
 
 jobs:
-  zeitzonen_check:
-    runs-on: ubuntu-latest
-    outputs:
-      soll_laufen: ${{ steps.check.outputs.soll_laufen }}
-    steps:
-      - name: Berliner Zielzeit pruefen
-        id: check
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            # Manueller Start (workflow_dispatch) laeuft immer, unabhaengig
-            # von der Uhrzeit - unveraendertes Verhalten wie bisher.
-            echo "soll_laufen=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          jetzt_h=$(TZ=Europe/Berlin date +%-H)
-          jetzt_m=$(TZ=Europe/Berlin date +%-M)
-          jetzt_gesamt=$((jetzt_h * 60 + jetzt_m))
-          # Zielzeiten in Minuten seit Mitternacht (Europe/Berlin):
-          # 05:00, 07:30, 10:00, 12:45, 14:00, 16:30, 19:00, 20:30
-          ziele="300 450 600 765 840 990 1140 1230"
-          soll=false
-          for ziel in $ziele; do
-            diff=$((jetzt_gesamt - ziel))
-            # Toleranzfenster 0-90 Minuten nach der Zielzeit (Sicherheitspuffer
-            # fuer verzoegerte GitHub-Cron-Trigger; die Zielzeiten liegen
-            # mindestens 2,5h auseinander, daher kein Ueberlappungsrisiko).
-            if [ "$diff" -ge 0 ] && [ "$diff" -le 90 ]; then
-              soll=true
-            fi
-          done
-          echo "Aktuelle Berliner Zeit: ${jetzt_h}:${jetzt_m} (Minute ${jetzt_gesamt})"
-          echo "soll_laufen=$soll" >> "$GITHUB_OUTPUT"
-
   run:
-    needs: zeitzonen_check
-    if: needs.zeitzonen_check.outputs.soll_laufen == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
