@@ -34,6 +34,24 @@ jobs:
           restore-keys: |
             gold-trade-alert-state-
 
+      # Reine Diagnose: verändert weder Zeitplan noch Report-Logik.
+      # github.event.schedule zeigt bei schedule-Runs den tatsächlich
+      # auslösenden Cron-Ausdruck an.
+      - name: Schedule-Diagnose
+        run: |
+          echo "========== SCHEDULE-DIAGNOSE =========="
+          echo "Event: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+          echo "Workflow: ${{ github.workflow }}"
+          echo "Run-ID: ${{ github.run_id }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "UTC:"
+          date -u '+%Y-%m-%d %H:%M:%S %Z'
+          echo "Europe/Berlin:"
+          TZ=Europe/Berlin date '+%Y-%m-%d %H:%M:%S %Z (%z)'
+          echo "========================================"
+
       - name: Report erzeugen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
