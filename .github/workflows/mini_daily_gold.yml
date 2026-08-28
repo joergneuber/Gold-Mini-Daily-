@@ -34,6 +34,64 @@ jobs:
           restore-keys: |
             gold-trade-alert-state-
 
+      # 90-Minuten-Toleranz: Ein automatischer Cron-Lauf darf bis
+      # maximal 90 Minuten nach seiner jeweiligen Sollzeit laufen.
+      - name: Cron-Verzögerung prüfen (90 Minuten)
+        if: github.event_name == 'schedule'
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          TOLERANZ_MINUTEN = 90
+          jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
+          schedule = os.environ.get("SCHEDULE", "").strip()
+
+          erlaubte_crons = {
+              "0 5,10,14,19 * * 1-5",
+              "30 7,16,20 * * 1-5",
+              "45 12 * * 1-5",
+          }
+
+          if schedule not in erlaubte_crons:
+              raise SystemExit(f"Unbekannter Cron-Ausdruck: {schedule}")
+
+          teile = schedule.split()
+          minute = int(teile[0])
+          stunden = [int(x) for x in teile[1].split(",")]
+
+          kandidaten = []
+          for stunde in stunden:
+              ziel = jetzt.replace(
+                  hour=stunde,
+                  minute=minute,
+                  second=0,
+                  microsecond=0,
+              )
+              if ziel <= jetzt:
+                  kandidaten.append(ziel)
+
+          if not kandidaten:
+              raise SystemExit("Cron-Lauf wurde vor der Sollzeit gestartet.")
+
+          zielzeit = max(kandidaten)
+          verzoegerung = int((jetzt - zielzeit).total_seconds() // 60)
+
+          print(f"Cron: {schedule}")
+          print(f"Sollzeit: {zielzeit.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+          print(f"Aktuelle Zeit: {jetzt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+          print(f"Verzögerung: {verzoegerung} Minuten")
+          print(f"Erlaubte Verzögerung: {TOLERANZ_MINUTEN} Minuten")
+
+          if verzoegerung > TOLERANZ_MINUTEN:
+              raise SystemExit("Cron-Lauf liegt außerhalb des 90-Minuten-Fensters.")
+
+          print("Cron-Lauf innerhalb des erlaubten 90-Minuten-Fensters.")
+          PY
+
       # Reine Diagnose: verändert weder Zeitplan noch Report-Logik.
       # github.event.schedule zeigt bei schedule-Runs den tatsächlich
       # auslösenden Cron-Ausdruck an.
