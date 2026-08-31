@@ -3,13 +3,9 @@ name: Mini Daily Gold
 on:
   schedule:
     # Automatische Starts in Europe/Berlin. GitHub beruecksichtigt damit
-    # Sommer-/Winterzeit automatisch. Die bestehende Code-Logik bleibt
-    # unveraendert: 05:00, 07:30, 10:00, 12:45, 14:00, 16:30, 19:00, 20:30.
-    - cron: "0 5,10,14,19 * * 1-5"
-      timezone: "Europe/Berlin"
-    - cron: "30 7,16,20 * * 1-5"
-      timezone: "Europe/Berlin"
-    - cron: "45 12 * * 1-5"
+    # Sommer-/Winterzeit automatisch.
+    # Neue Laufzeiten: 06:45, 09:45, 13:45, 16:45, 19:45.
+    - cron: "45 6,9,13,16,19 * * 1-5"
       timezone: "Europe/Berlin"
   workflow_dispatch: {}
 
