@@ -47,9 +47,7 @@ jobs:
           schedule = os.environ.get("SCHEDULE", "").strip()
 
           erlaubte_crons = {
-              "0 5,10,14,19 * * 1-5",
-              "30 7,16,20 * * 1-5",
-              "45 12 * * 1-5",
+              "45 6,9,13,16,19 * * 1-5",
           }
 
           if schedule not in erlaubte_crons:
