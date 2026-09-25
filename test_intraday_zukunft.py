@@ -171,9 +171,11 @@ def test_zukunftseinschaetzung_trennt_szenario_trigger_und_kanalausbruch(monkeyp
     assert "4336.90" in prompt
     assert "79.9% von unten" in prompt
     assert "nicht als vollständige Trendwende" in prompt
-    assert "Eine Marke unterhalb der oberen Kanalgrenze" in prompt
+    assert "Klassifiziere JEDE höhere Marke EINZELN anhand ihrer tatsächlichen Lage relativ zur relevanten Kanalgrenze" in prompt
+    assert "Nenne für JEDE relevante Marke ihre eigene Kategorie ausdrücklich in einem eigenen Teilsatz" in prompt
+    assert "fasse niemals zwei oder mehr Marken unter einer gemeinsamen Lagebeschreibung zusammen" in prompt
     assert "eine vorgelagerte Hürde" in prompt
-    assert "nur tatsächlich über der oberen bzw. unter der unteren Kanalgrenze liegende Strukturen" in prompt
+    assert "Strukturen, die noch zwischen Szenario-Trigger und Kanalgrenze liegen, sind als vorgelagerte Hürden einzuordnen" in prompt
 
 if __name__ == "__main__":
     main()
