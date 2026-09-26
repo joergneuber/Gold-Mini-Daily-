@@ -1,0 +1,64 @@
+name: Gold Trade Alerts
+
+on:
+  schedule:
+    # Separater Alert-Lauf: Montag bis Freitag, stündlich von 07:30 bis 20:30 Europe/Berlin.
+    # Der bestehende Mini-Daily-Workflow bleibt unverändert.
+    - cron: "30 7-20 * * 1-5"
+      timezone: "Europe/Berlin"
+  workflow_dispatch:
+
+jobs:
+  trade_alerts:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Trade-Alert-Status wiederherstellen
+        uses: actions/cache/restore@v4
+        with:
+          path: trade_alert_state.json
+          key: gold-trade-alert-state-${{ github.run_id }}
+          restore-keys: |
+            gold-trade-alert-state-
+
+      - name: Alert-Status berechnen
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+        run: |
+          python - <<'PY'
+          import mini_daily_gold
+
+          positionstrading_status = mini_daily_gold.berechne_positionstrading_status()
+          range_ausbruch_status = mini_daily_gold.berechne_range_ausbruch_status()
+
+          mini_daily_gold.schreibe_trade_alerts(
+              positionstrading_status,
+              range_ausbruch_status,
+          )
+          PY
+
+      - name: Separate Trade-Alerts senden
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_EMPFAENGER: ${{ secrets.MAIL_EMPFAENGER }}
+        run: python send_trade_alerts.py
+
+      - name: Trade-Alert-Status speichern
+        uses: actions/cache/save@v4
+        with:
+          path: trade_alert_state.json
+          key: gold-trade-alert-state-${{ github.run_id }}
