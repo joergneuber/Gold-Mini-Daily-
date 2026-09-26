@@ -136,6 +136,8 @@ INTRADAY_RANGE_BUCKET_USD = 6
 # Bewusst getrennt von den bestehenden Pivot-/Range-Systemen.
 INTRADAY_EMA_KURZ = 20
 INTRADAY_EMA_LANG = 50
+INTRADAY_EMA100 = 100
+INTRADAY_EMA200 = 200
 INTRADAY_ATR_FENSTER = 14
 INTRADAY_SWING_FENSTER = 2
 INTRADAY_BREAKOUT_LOOKBACK = {"1h": 8, "30min": 8, "15min": 12}
@@ -421,6 +423,43 @@ def hole_kursdaten():
     }
 
 
+def bestimme_atr_tageszeit_kontext(zeitpunkt):
+    """Ordnet den Intraday-ATR nach Tageszeit ein, ohne den ATR-Wert zu verändern."""
+    if zeitpunkt is None:
+        return {"phase": "unbekannt", "regel": "Tageszeit nicht verfügbar; ATR14 nur als aktuelle lokale Volatilität interpretieren."}
+    ts = pd.Timestamp(zeitpunkt)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    local = ts.tz_convert(ZoneInfo("Europe/Berlin"))
+    minuten = local.hour * 60 + local.minute
+    if 8 * 60 <= minuten < 10 * 60 + 30:
+        phase = "Europa-Eröffnungsphase"
+        regel = "ATR14 kann typischerweise anziehen; nicht als statische Erwartung für spätere Stunden fortschreiben."
+    elif 10 * 60 + 30 <= minuten < 12 * 60:
+        phase = "europäische Handelsphase"
+        regel = "ATR14 als aktuelle lokale Volatilität interpretieren; typische Aktivität kann sich bis zur Mittagsphase verändern."
+    elif 12 * 60 <= minuten < 14 * 60:
+        phase = "europäische Mittagsphase"
+        regel = "ATR14 kann typischerweise niedriger sein; daraus keine statisch niedrige Volatilität für spätere Stunden ableiten."
+    elif 14 * 60 <= minuten < 15 * 60:
+        phase = "Europa/US-Übergangsphase"
+        regel = "ATR14 als aktuelle lokale Volatilität interpretieren; bevorstehende US-Aktivität nicht aus einem früheren ATR14-Wert ableiten."
+    elif 15 * 60 <= minuten < 17 * 60:
+        phase = "US-Eröffnungsphase"
+        regel = "ATR14 kann typischerweise anziehen; einen früheren ATR14-Wert nicht unverändert für die US-Eröffnung fortschreiben."
+    elif 17 * 60 <= minuten < 21 * 60:
+        phase = "US-Handelsphase"
+        regel = "ATR14 als aktuelle lokale Volatilität interpretieren; Aktivität kann sich gegenüber der US-Eröffnung wieder verändern."
+    elif 21 * 60 <= minuten < 22 * 60:
+        phase = "späte US-Phase"
+        regel = "ATR14 als aktuelle lokale Volatilität interpretieren und nicht zeitlich konstant fortschreiben."
+    elif minuten >= 22 * 60 or minuten < 8 * 60:
+        phase = "außerhalb definierter Kernphasen"
+        regel = "Keine besondere Kernphasen-Aktivität unterstellen; ATR14 nur als aktuelle lokale Volatilität verwenden."
+    else:
+        phase = "Intraday-Übergangsphase"
+        regel = "ATR14 als aktuelle lokale Volatilität interpretieren und nicht zeitlich konstant fortschreiben."
+    return {"phase": phase, "regel": regel, "zeitpunkt_local": local.strftime("%d.%m.%Y %H:%M %Z")}
 def _intraday_trendinfo(df, lookback):
     """Ermittelt eine einfache, reproduzierbare MTF-Struktur ohne Lookahead."""
     if df is None or len(df) < max(INTRADAY_EMA_LANG + 5, lookback + 5):
@@ -428,11 +467,11 @@ def _intraday_trendinfo(df, lookback):
     x = df.copy()
     x["EMA20"] = x["Close"].ewm(span=INTRADAY_EMA_KURZ, adjust=False).mean()
     x["EMA50"] = x["Close"].ewm(span=INTRADAY_EMA_LANG, adjust=False).mean()
-    x["EMA100"] = x["Close"].ewm(span=100, adjust=False).mean()
-    x["EMA200"] = x["Close"].ewm(span=200, adjust=False).mean()
-    wma_weights = np.arange(1, 201, dtype=float)
+    x["EMA100"] = x["Close"].ewm(span=INTRADAY_EMA100, adjust=False).mean()
+    x["EMA200"] = x["Close"].ewm(span=INTRADAY_EMA200, adjust=False).mean()
+    wma_weights = np.arange(1, INTRADAY_EMA200 + 1, dtype=float)
     wma_sum = wma_weights.sum()
-    x["WMA200"] = x["Close"].rolling(200).apply(
+    x["WMA200"] = x["Close"].rolling(INTRADAY_EMA200).apply(
         lambda v: float(np.dot(v, wma_weights) / wma_sum), raw=True
     )
     x["ATR14"] = berechne_atr(x, INTRADAY_ATR_FENSTER)
@@ -487,11 +526,13 @@ def _intraday_trendinfo(df, lookback):
         elif lh and ll: struktur = "tiefere Hochs/Tiefere Tiefs"
         elif hh or hl: struktur = "bullische Verbesserung"
         elif lh or ll: struktur = "bärische Verschlechterung"
+    atr_tageszeit_kontext = bestimme_atr_tageszeit_kontext(x.index[-1])
     return {
         "close": close, "ema20": ema20, "ema50": ema50,
         "ema100": ema100, "ema200": ema200, "wma200": wma200,
         "wma200_richtung": wma200_richtung, "ma_lage": ma_lage,
         "atr14": atr,
+        "atr_tageszeit_kontext": atr_tageszeit_kontext,
         "trend": trend, "struktur": struktur, "momentum": momentum,
         "high": recent_high, "low": recent_low, "zeitpunkt": x.index[-1],
     }
@@ -538,7 +579,15 @@ def formatiere_intraday_zukunft(zukunft, fmt):
     def zeile(label, rolle, x):
         return (f"{label} – {rolle}: "
                 f"{x['trend'].capitalize()} | Struktur {x['struktur']} | "
-                f"Momentum {x['momentum']} | Durchschnittslinien: {x['ma_lage']}")
+                f"Momentum {x['momentum']} | "
+                f"EMA20 {fmt(x.get('ema20')) if x.get('ema20') is not None else 'n.v.'} | EMA50 {fmt(x.get('ema50')) if x.get('ema50') is not None else 'n.v.'} | "
+                f"EMA100 {fmt(x.get('ema100')) if x.get('ema100') is not None else 'n.v.'} | "
+                f"EMA200 {fmt(x.get('ema200')) if x.get('ema200') is not None else 'n.v.'} | "
+                f"WMA200 {fmt(x['wma200']) if x.get('wma200') is not None else 'n.v.'} "
+                f"({x.get('wma200_richtung', 'n.v.')}) | MA-Lage: {x['ma_lage']} | "
+                f"ATR14 {fmt(x['atr14']) if x.get('atr14') is not None else 'n.v.'} | "
+                f"Volatilitätsphase: {x.get('atr_tageszeit_kontext', {}).get('phase', 'n.v.')} | "
+                f"ATR-Kontext: {x.get('atr_tageszeit_kontext', {}).get('regel', 'n.v.')}")
 
     bull = f"über {fmt(zukunft['bull_trigger'])}" if zukunft.get("bull_trigger") else "kein bullischer Trigger"
     bear = f"unter {fmt(zukunft['bear_trigger'])}" if zukunft.get("bear_trigger") else "kein bärischer Trigger"
@@ -940,6 +989,16 @@ Schreibe eine kompakte Zukunftseinschätzung in GENAU 4 Sätzen, deutsch, sachli
 3. "Daytrading:" – Ordne die nächsten Handelsstunden anhand der bereits berechneten lokalen Trigger und der 15m/30m-Bestätigung ein.
 4. "Übergeordnet:" – Ordne die kurzfristige Entwicklung in die vorhandene Intraday-Chartstruktur und 6M-/Positionsstruktur ein. Formuliere einen Kanal-Ausbruch nicht als vollständige Trendwende; nenne als nachgelagerte übergeordnete Bestätigung nur bereits gelieferte Widerstände bzw. Durchschnittsstrukturen, die relativ zur Kanalgrenze tatsächlich auf der entsprechenden Ausbruchsseite liegen. Strukturen, die noch zwischen Szenario-Trigger und Kanalgrenze liegen, sind als vorgelagerte Hürden einzuordnen.
 
+INTRADAY-MA-INTERPRETATION:
+- Für 1h, 30m und 15m sind EMA20, EMA50, EMA100 und EMA200 sowie WMA200 die gelieferten Durchschnittsstrukturen. Nutze ausschließlich diese Werte; erfinde keine zusätzlichen MA-Werte.
+- EMA20/EMA50 beschreiben die kurzfristige Trend-/Momentumstruktur; EMA100/EMA200 und WMA200 dienen als übergeordnete Intraday-Struktur und Bestätigung. Beziehe ihre tatsächliche Lage zum Kurs und zueinander ein.
+- ATR14 beschreibt die aktuelle lokale Intraday-Volatilität und darf NICHT als zeitlich konstanter Wert in die Zukunft fortgeschrieben werden. Berücksichtige die gelieferte Tageszeit-Phase: Europa-Eröffnung und US-Eröffnung können typischerweise höhere Aktivität bedeuten, die Mittagsphase typischerweise niedrigere; daraus keine sichere Prognose ableiten.
+- Verwende für eine Zukunftseinschätzung immer den ATR14-Kontext der jeweils betrachteten Intraday-Zeitebene. Ein ATR14-Wert von 10:00 Uhr darf nicht unverändert als Volatilitätsannahme für 13:00 Uhr oder die US-Eröffnung verwendet werden.
+
+ATR-TAGESZEIT-KONTEXT (VERBINDLICH):
+- ATR14 wird nicht künstlich zeitbereinigt oder skaliert.
+- Die Tageszeit-Phase ist nur ein Interpretationskontext für die erwartbare Intraday-Aktivität.
+- Verwende die konkrete Phase je 1h/30m/15m-Zeitebene; übertrage keinen ATR14-Wert zeitlich unverändert auf eine andere Tagesphase.
 INTRADAY-DATEN:
 - Realtime-Kurs: {daten['realtime']:.2f} USD
 - Schlusskurs Vortag: {daten['prev_close']:.2f} USD
