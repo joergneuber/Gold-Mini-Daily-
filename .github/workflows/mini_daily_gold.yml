@@ -182,9 +182,9 @@ jobs:
       actions: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -192,7 +192,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Trade-Alert-Status wiederherstellen
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: trade_alert_state.json
           key: gold-trade-alert-state-${{ github.run_id }}
@@ -205,7 +205,7 @@ jobs:
       # ForexFactory-Event-Discovery. Keine Trading-Logik.
       # ============================================================
       - name: Wirtschafts-/Makrokalender wiederherstellen
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             economic_events_cache.json
@@ -305,7 +305,7 @@ jobs:
 
       - name: Wirtschafts-/Makrokalender speichern
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             economic_events_cache.json
@@ -313,7 +313,7 @@ jobs:
           key: gold-economic-events-v2-${{ runner.os }}-${{ github.run_id }}
 
       - name: Trade-Alert-Status speichern
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: trade_alert_state.json
           key: gold-trade-alert-state-${{ github.run_id }}
