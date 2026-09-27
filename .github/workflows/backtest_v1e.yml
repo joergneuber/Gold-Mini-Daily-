@@ -7,8 +7,8 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Abhängigkeiten installieren
@@ -16,7 +16,7 @@ jobs:
       - name: Backtest ausführen
         run: python backtest/backtest_v1e.py
       - name: Trade-Log als Artefakt hochladen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: backtest-v1e-trades
           path: backtest_v1e_trades.csv
