@@ -15,9 +15,9 @@ jobs:
       actions: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -25,7 +25,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Trade-Alert-Status wiederherstellen
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: trade_alert_state.json
           key: gold-trade-alert-state-${{ github.run_id }}
@@ -58,7 +58,7 @@ jobs:
         run: python send_trade_alerts.py
 
       - name: Trade-Alert-Status speichern
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: trade_alert_state.json
           key: gold-trade-alert-state-${{ github.run_id }}
