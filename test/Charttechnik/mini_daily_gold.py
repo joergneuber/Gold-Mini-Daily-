@@ -251,9 +251,9 @@ POSITIONSTRADING_REGELN_TEXT = (
     "Regeln: Nur Long. Trend positiv (Tages-Regression über 50 Handelstage) "
     "und Kurs berührt ein rollierendes 10-Tage-Tief, schließt aber wieder "
     "darüber -> KAUF. Stop = dieses Tief. TP1/TP2 bevorzugt strukturelle "
-    "Widerstände ausschließlich aus der Chartstruktur; Entry/Stop/TP werden "
-    "charttechnisch bestimmt, danach CRV-Prüfung. Kein charttechnisches Ziel "
-    "=> kein Trade: "
+    "Widerstände mit CRV > 1, bewertet nach Strukturqualität und Zeitebene "
+    "(6M > Tageschart > Intraday); wenn kein geeignetes Strukturziel existiert, "
+    "gilt 2R/3R als Fallback (R = Einstieg-Stop): "
     "TP1 erreicht -> Stop auf Breakeven, TP2 erreicht -> Stop auf TP1, danach "
     "täglich am 10-Tage-Tief nachgezogen. Stop erreicht -> VERKAUF, danach "
     "3 Handelstage Cooldown ohne neuen Einstieg."
@@ -1701,252 +1701,14 @@ def analysiere_intraday_chartstruktur(intraday_reihe):
 
 
 
-def bestimme_strukturelle_tps(entry, stop, entry_zeit, intraday_reihe=None, daily_reihe=None):
-    """Bestimmt TP1/TP2 ausschließlich aus charttechnischen Strukturen.
+def _chartkandidaten_fuer_setup(entry_zeit, intraday_reihe=None, daily_reihe=None):
+    """Sammelt ausschließlich bereits bekannte Chartstrukturen.
 
-    Verbindliche Reihenfolge:
-      1) Charttechnische Ziele aus Intraday, Tageschart und 6M sammeln.
-      2) Für jedes Ziel das CRV berechnen; CRV <= 1 verwirft das Ziel für TP,
-         entfernt es aber nicht aus der Diagnose.
-      3) TP1 wird hierarchisch bestimmt: Widerstandszone > Umkehr-/Swing-Struktur
-         > Kanal; innerhalb derselben Strukturqualität 6M > Tageschart > Intraday.
-         Bei gleicher Priorität gewinnt das nächstliegende Ziel oberhalb des Entry.
-      4) TP2 ist die nächsthöhere charttechnische Struktur oberhalb von TP1.
-      5) Gibt es kein charttechnisches TP1 mit CRV > 1 oder keine höhere
-         charttechnische Struktur für TP2, ist das Setup nicht vollständig und
-         es wird KEIN mathematischer 2R/3R-Fallback erzeugt.
-
-    Wichtig: 2R und 3R sind keine charttechnischen Ziele und werden deshalb
-    in dieser Testversion nicht als Fallback verwendet.
+    Keine CRV-Filterung und keine mathematischen Ersatz-Ziele. Support und
+    Widerstand bleiben vollständig erhalten; erst der nachgelagerte Setup-/CRV-
+    Schritt entscheidet, ob daraus ein zulässiger Trade entsteht.
     """
-    entry = float(entry)
-    stop = float(stop)
-    risiko = entry - stop
-    if risiko <= 0:
-        return {
-            "status": "kein_trade",
-            "grund": "Ungültiges Long-Risiko: Stop liegt nicht unter Entry.",
-            "tp1": None, "tp2": None,
-            "tp1_quelle": None, "tp2_quelle": None,
-            "tp1_crv": None, "tp2_crv": None,
-            "kandidaten": [], "verworfen": [],
-        }
-
-    def _bis_zeitpunkt(reihe):
-        if reihe is None or len(reihe) == 0 or entry_zeit is None:
-            return None
-        idx = pd.DatetimeIndex(reihe.index)
-        entry_ts = pd.Timestamp(entry_zeit)
-        if idx.tz is None and entry_ts.tzinfo is not None:
-            entry_ts = entry_ts.tz_localize(None)
-        elif idx.tz is not None:
-            if entry_ts.tzinfo is None:
-                entry_ts = entry_ts.tz_localize(idx.tz)
-            else:
-                entry_ts = entry_ts.tz_convert(idx.tz)
-        idx = idx[idx <= entry_ts]
-        if len(idx) == 0:
-            return None
-        return reihe.loc[:idx[-1]]
-
-    def _kanal_marke(reihe, fenster, min_punkte, label):
-        teil = _bis_zeitpunkt(reihe)
-        if teil is None or len(teil) < max(20, fenster * 2 + 3):
-            return []
-        kanal = finde_trendkanal(teil, fenster=fenster, min_punkte=min_punkte)
-        if kanal is None:
-            return []
-        x = mdates.date2num(teil.index[-1])
-        obere = float(kanal["obere_linie"][0] * x + kanal["obere_linie"][1])
-        if obere <= entry:
-            return []
-        return [{
-            "preis": obere,
-            "quelle": f"{label}-Kanal ({kanal['formation']})",
-            "treffer": 0,
-            "typ": "kanal",
-        }]
-
-    def _umkehrzonen(reihe, fenster, bucket_usd, min_treffer, top_n,
-                     min_abstand_usd, label):
-        teil = _bis_zeitpunkt(reihe)
-        if teil is None or len(teil) < fenster * 2 + 5:
-            return []
-        roh = finde_intraday_umkehrzonen(
-            teil, fenster=fenster, bucket_usd=bucket_usd,
-            min_treffer=min_treffer, top_n=top_n,
-        )
-        kandidaten = []
-        for preis, treffer in roh.get("widerstandszonen", []):
-            preis = float(preis)
-            if preis <= entry:
-                continue
-            kandidaten.append({
-                "preis": preis,
-                "quelle": f"{label}-Umkehrzone ({int(treffer)}x)",
-                "treffer": int(treffer),
-                "typ": "umkehrzone",
-            })
-        return kandidaten
-
-    def _zonen_marken(reihe, fenster, bucket_usd, min_treffer, top_n,
-                      min_abstand_usd, label):
-        teil = _bis_zeitpunkt(reihe)
-        if teil is None or len(teil) < fenster * 2 + 5:
-            return []
-        roh = analysiere_reaktionszonen(
-            teil, fenster=fenster, bucket_usd=bucket_usd,
-            min_treffer=min_treffer, top_n=top_n * 3,
-        )
-        zonen = zonen_naechste_filter(
-            roh, referenz_preis=entry,
-            min_abstand_usd=min_abstand_usd, top_n=top_n,
-        )
-        zonen = zonen.get("widerstandszonen", [])
-        return [
-            {
-                "preis": float(preis),
-                "quelle": f"{label}-Widerstandszone ({int(treffer)}x)",
-                "treffer": int(treffer),
-                "typ": "widerstandszone",
-            }
-            for preis, treffer in zonen
-            if float(preis) > entry
-        ]
-
-    intraday_kandidaten = []
-    intraday_teil = _bis_zeitpunkt(intraday_reihe)
-    if intraday_teil is not None and len(intraday_teil) >= 20:
-        intraday_kandidaten.extend(_kanal_marke(
-            intraday_teil, INTRADAY_KANAL_FENSTER, INTRADAY_KANAL_MIN_PUNKTE, "Intraday"
-        ))
-        intraday_kandidaten.extend(_umkehrzonen(
-            intraday_teil, INTRADAY_UMKEHR_FENSTER, INTRADAY_UMKEHR_BUCKET_USD,
-            INTRADAY_UMKEHR_MIN_TREFFER, INTRADAY_UMKEHR_TOP_N,
-            INTRADAY_UMKEHR_MIN_ABSTAND_USD, "Intraday"
-        ))
-
-    tages_kandidaten = []
-    teil_daily = _bis_zeitpunkt(daily_reihe)
-    if teil_daily is not None and len(teil_daily) >= 60:
-        tages_kandidaten.extend(_kanal_marke(
-            teil_daily, DAILY_KANAL_FENSTER, DAILY_KANAL_MIN_PUNKTE, "Tageschart"
-        ))
-        tages_kandidaten.extend(_zonen_marken(
-            teil_daily, DAILY_ZONEN_FENSTER, DAILY_ZONEN_BUCKET_USD,
-            DAILY_ZONEN_MIN_TREFFER, DAILY_ZONEN_TOP_N,
-            DAILY_ZONEN_MIN_ABSTAND_USD, "Tageschart"
-        ))
-
-    sechs_m_kandidaten = []
-    if teil_daily is not None and len(teil_daily) >= 60:
-        sechs_m = teil_daily.loc[
-            teil_daily.index >= (teil_daily.index[-1] - pd.DateOffset(months=LANGFRIST_MONATE))
-        ]
-        sechs_m_kandidaten.extend(_kanal_marke(
-            sechs_m, LANGFRIST_KANAL_FENSTER, LANGFRIST_KANAL_MIN_PUNKTE, "6M"
-        ))
-        sechs_m_kandidaten.extend(_zonen_marken(
-            sechs_m, LANGFRIST_ZONEN_FENSTER, LANGFRIST_ZONEN_BUCKET_USD,
-            LANGFRIST_ZONEN_MIN_TREFFER, LANGFRIST_ZONEN_TOP_N,
-            LANGFRIST_ZONEN_MIN_ABSTAND_USD, "6M"
-        ))
-
-    ebenen = (
-        ("Intraday", intraday_kandidaten),
-        ("Tageschart", tages_kandidaten),
-        ("6M", sechs_m_kandidaten),
-    )
-
-    alle = []
-    verworfen = []
-    for ebene, kandidaten in ebenen:
-        for kandidat in kandidaten:
-            preis = float(kandidat["preis"])
-            crv = (preis - entry) / risiko
-            k = dict(kandidat)
-            k["ebene"] = ebene
-            k["crv"] = crv
-            if crv <= 1.0:
-                k["grund"] = "CRV <= 1"
-                verworfen.append(k)
-                continue
-            alle.append(k)
-
-    def _struktur_prioritaet(k):
-        typ = str(k.get("typ", "")).lower()
-        if typ == "widerstandszone":
-            return (3, int(k.get("treffer", 0) or 0))
-        if typ in ("umkehrzone", "swing", "umkehr"):
-            return (2, 0)
-        return (1, 0)
-
-    def _ebenen_prioritaet(k):
-        if k["ebene"] == "6M":
-            return 3
-        if k["ebene"] == "Tageschart":
-            return 2
-        return 1
-
-    # TP1: echte Hierarchie, ohne Score, ohne 2R-Referenzanker.
-    tp1_kandidat = max(
-        alle,
-        key=lambda k: (
-            _struktur_prioritaet(k),
-            _ebenen_prioritaet(k),
-            -float(k["preis"]),
-        ),
-        default=None,
-    )
-    if tp1_kandidat is None:
-        return {
-            "status": "kein_trade",
-            "grund": "Kein charttechnisches TP1 mit CRV > 1 vorhanden.",
-            "tp1": None, "tp2": None,
-            "tp1_quelle": None, "tp2_quelle": None,
-            "tp1_crv": None, "tp2_crv": None,
-            "kandidaten": alle, "verworfen": verworfen,
-        }
-
-    # TP2: die nächsthöhere charttechnische Struktur oberhalb TP1.
-    tp2_kandidaten = [k for k in alle if k["preis"] > tp1_kandidat["preis"] + 1e-6]
-    tp2_kandidat = min(tp2_kandidaten, key=lambda k: float(k["preis"]), default=None)
-    if tp2_kandidat is None:
-        return {
-            "status": "kein_trade",
-            "grund": "Kein nächsthöheres charttechnisches TP2 oberhalb TP1 vorhanden.",
-            "tp1": None, "tp2": None,
-            "tp1_quelle": None, "tp2_quelle": None,
-            "tp1_crv": None, "tp2_crv": None,
-            "kandidaten": alle, "verworfen": verworfen,
-        }
-
-    return {
-        "status": "ok",
-        "tp1": float(tp1_kandidat["preis"]),
-        "tp2": float(tp2_kandidat["preis"]),
-        "tp1_quelle": tp1_kandidat["quelle"],
-        "tp2_quelle": tp2_kandidat["quelle"],
-        "tp1_crv": float(tp1_kandidat["crv"]),
-        "tp2_crv": float(tp2_kandidat["crv"]),
-        "tp1_typ": tp1_kandidat["typ"],
-        "tp2_typ": tp2_kandidat["typ"],
-        "kandidaten": alle,
-        "verworfen": verworfen,
-    }
-
-
-def bestimme_strukturellen_stop(entry, entry_zeit, intraday_reihe=None, daily_reihe=None):
-    """Ermittelt den initialen Long-Stop ausschließlich aus Support-Strukturen.
-
-    Verwendet Supportzonen, bestätigte Umkehr-/Swing-Tiefs und Kanaluntergrenzen.
-    Der Stop liegt knapp unter der gewählten Struktur. Es gibt keinen
-    mathematischen Stop-Fallback: ohne charttechnische Supportstruktur kein Setup.
-    """
-    entry = float(entry)
-    kandidaten = []
-
-    def _bis_zeitpunkt(reihe):
+    def bis_zeitpunkt(reihe):
         if reihe is None or len(reihe) == 0 or entry_zeit is None:
             return None
         idx = pd.DatetimeIndex(reihe.index)
@@ -1958,82 +1720,190 @@ def bestimme_strukturellen_stop(entry, entry_zeit, intraday_reihe=None, daily_re
         idx = idx[idx <= ts]
         return None if len(idx) == 0 else reihe.loc[:idx[-1]]
 
-    def _add_zone(reihe, label, fenster, bucket, min_treffer, top_n):
-        teil = _bis_zeitpunkt(reihe)
+    def kanal(reihe, fenster, min_punkte, ebene):
+        teil = bis_zeitpunkt(reihe)
+        if teil is None or len(teil) < max(20, fenster * 2 + 3):
+            return []
+        info = finde_trendkanal(teil, fenster=fenster, min_punkte=min_punkte)
+        if info is None:
+            return []
+        x = mdates.date2num(teil.index[-1])
+        oben = float(info["obere_linie"][0] * x + info["obere_linie"][1])
+        unten = float(info["untere_linie"][0] * x + info["untere_linie"][1])
+        return [
+            {"preis": oben, "typ": "kanal", "seite": "widerstand", "ebene": ebene,
+             "quelle": f"{ebene}-Kanal ({info['formation']})", "treffer": 0},
+            {"preis": unten, "typ": "kanal", "seite": "support", "ebene": ebene,
+             "quelle": f"{ebene}-Kanal ({info['formation']})", "treffer": 0},
+        ]
+
+    def umkehr(reihe, fenster, bucket, min_treffer, top_n, ebene):
+        teil = bis_zeitpunkt(reihe)
         if teil is None or len(teil) < fenster * 2 + 5:
-            return
+            return []
+        roh = finde_intraday_umkehrzonen(
+            teil, fenster=fenster, bucket_usd=bucket,
+            min_treffer=min_treffer, top_n=top_n,
+        )
+        out = []
+        for preis, treffer in roh.get("widerstandszonen", []):
+            out.append({"preis": float(preis), "typ": "umkehrzone", "seite": "widerstand",
+                        "ebene": ebene, "quelle": f"{ebene}-Umkehrzone ({int(treffer)}x)",
+                        "treffer": int(treffer)})
+        for preis, treffer in roh.get("supportzonen", []):
+            out.append({"preis": float(preis), "typ": "umkehrzone", "seite": "support",
+                        "ebene": ebene, "quelle": f"{ebene}-Support/Umkehrzone ({int(treffer)}x)",
+                        "treffer": int(treffer)})
+        return out
+
+    def reaktionszonen(reihe, fenster, bucket, min_treffer, top_n, min_abstand, ebene):
+        teil = bis_zeitpunkt(reihe)
+        if teil is None or len(teil) < fenster * 2 + 5:
+            return []
         roh = analysiere_reaktionszonen(
             teil, fenster=fenster, bucket_usd=bucket,
             min_treffer=min_treffer, top_n=top_n * 3,
         )
+        roh = zonen_naechste_filter(
+            roh, referenz_preis=float(teil["Close"].iloc[-1]),
+            min_abstand_usd=min_abstand, top_n=top_n,
+        )
+        out = []
+        for preis, treffer in roh.get("widerstandszonen", []):
+            out.append({"preis": float(preis), "typ": "widerstandszone", "seite": "widerstand",
+                        "ebene": ebene, "quelle": f"{ebene}-Widerstandszone ({int(treffer)}x)",
+                        "treffer": int(treffer)})
         for preis, treffer in roh.get("supportzonen", []):
-            preis = float(preis)
-            if preis < entry:
-                kandidaten.append({
-                    "preis": preis, "quelle": f"{label}-Supportzone ({int(treffer)}x)",
-                    "typ": "supportzone", "treffer": int(treffer),
-                    "ebene": label,
-                })
+            out.append({"preis": float(preis), "typ": "widerstandszone", "seite": "support",
+                        "ebene": ebene, "quelle": f"{ebene}-Supportzone ({int(treffer)}x)",
+                        "treffer": int(treffer)})
+        return out
 
-    _add_zone(intraday_reihe, "Intraday", INTRADAY_UMKEHR_FENSTER,
-              INTRADAY_UMKEHR_BUCKET_USD, INTRADAY_UMKEHR_MIN_TREFFER,
-              INTRADAY_UMKEHR_TOP_N)
-    _add_zone(daily_reihe, "Tageschart", DAILY_ZONEN_FENSTER,
-              DAILY_ZONEN_BUCKET_USD, DAILY_ZONEN_MIN_TREFFER, DAILY_ZONEN_TOP_N)
-    if daily_reihe is not None and len(daily_reihe) >= 60:
-        teil_daily = _bis_zeitpunkt(daily_reihe)
-        if teil_daily is not None:
-            sechs_m = teil_daily.loc[
-                teil_daily.index >= (teil_daily.index[-1] - pd.DateOffset(months=LANGFRIST_MONATE))
-            ]
-            _add_zone(sechs_m, "6M", LANGFRIST_ZONEN_FENSTER,
-                      LANGFRIST_ZONEN_BUCKET_USD, LANGFRIST_ZONEN_MIN_TREFFER,
-                      LANGFRIST_ZONEN_TOP_N)
+    kandidaten = []
+    teil_i = bis_zeitpunkt(intraday_reihe)
+    if teil_i is not None and len(teil_i) >= 20:
+        kandidaten += kanal(teil_i, INTRADAY_KANAL_FENSTER, INTRADAY_KANAL_MIN_PUNKTE, "Intraday")
+        kandidaten += umkehr(teil_i, INTRADAY_UMKEHR_FENSTER, INTRADAY_UMKEHR_BUCKET_USD,
+                             INTRADAY_UMKEHR_MIN_TREFFER, INTRADAY_UMKEHR_TOP_N, "Intraday")
 
-    # Kanaluntergrenzen sind ebenfalls echte charttechnische Supportkandidaten.
-    for reihe, label, fenster, min_punkte in (
-        (intraday_reihe, "Intraday", INTRADAY_KANAL_FENSTER, INTRADAY_KANAL_MIN_PUNKTE),
-        (daily_reihe, "Tageschart", DAILY_KANAL_FENSTER, DAILY_KANAL_MIN_PUNKTE),
-    ):
-        teil = _bis_zeitpunkt(reihe)
-        if teil is None or len(teil) < max(20, fenster * 2 + 3):
-            continue
-        kanal = finde_trendkanal(teil, fenster=fenster, min_punkte=min_punkte)
-        if kanal is None:
-            continue
-        x = mdates.date2num(teil.index[-1])
-        untere = float(kanal["untere_linie"][0] * x + kanal["untere_linie"][1])
-        if untere < entry:
-            kandidaten.append({
-                "preis": untere, "quelle": f"{label}-Kanaluntergrenze ({kanal['formation']})",
-                "typ": "kanal", "treffer": 0, "ebene": label,
-            })
+    teil_d = bis_zeitpunkt(daily_reihe)
+    if teil_d is not None and len(teil_d) >= 60:
+        kandidaten += kanal(teil_d, DAILY_KANAL_FENSTER, DAILY_KANAL_MIN_PUNKTE, "Tageschart")
+        kandidaten += reaktionszonen(teil_d, DAILY_ZONEN_FENSTER, DAILY_ZONEN_BUCKET_USD,
+                                     DAILY_ZONEN_MIN_TREFFER, DAILY_ZONEN_TOP_N,
+                                     DAILY_ZONEN_MIN_ABSTAND_USD, "Tageschart")
+        sechs_m = teil_d.loc[teil_d.index >= (teil_d.index[-1] - pd.DateOffset(months=LANGFRIST_MONATE))]
+        kandidaten += kanal(sechs_m, LANGFRIST_KANAL_FENSTER, LANGFRIST_KANAL_MIN_PUNKTE, "6M")
+        kandidaten += reaktionszonen(sechs_m, LANGFRIST_ZONEN_FENSTER, LANGFRIST_ZONEN_BUCKET_USD,
+                                     LANGFRIST_ZONEN_MIN_TREFFER, LANGFRIST_ZONEN_TOP_N,
+                                     LANGFRIST_ZONEN_MIN_ABSTAND_USD, "6M")
+    return kandidaten
 
-    if not kandidaten:
-        return None
 
-    # Für den initialen Stop wird die nächstliegende tragfähige Supportstruktur
-    # unter dem Entry gewählt. Bei gleichem Preis gewinnt die höhere Zeitebene;
-    # es gibt keine Punktbewertung.
-    ebene_prio = {"Intraday": 1, "Tageschart": 2, "6M": 3}
-    kandidaten.sort(key=lambda k: (
-        abs(entry - k["preis"]),
-        -ebene_prio.get(k["ebene"], 0),
-        0 if k["typ"] == "supportzone" else 1,
-    ))
-    basis = kandidaten[0]
-    teil = _bis_zeitpunkt(intraday_reihe if basis["ebene"] == "Intraday" else daily_reihe)
-    if teil is None:
-        return None
-    atr = berechne_atr(teil, INTRADAY_ATR_FENSTER).dropna()
-    if atr.empty:
-        return None
-    puffer = 0.25 * float(atr.iloc[-1])
-    stop = float(basis["preis"]) - puffer
-    if stop >= entry:
-        return None
-    return {"stop": stop, "quelle": basis["quelle"], "struktur": basis,
-            "kandidaten": kandidaten, "puffer": puffer}
+def _struktur_prio(k):
+    typ = str(k.get("typ", "")).lower()
+    if typ == "widerstandszone":
+        return (3, int(k.get("treffer", 0) or 0))
+    if typ in ("umkehrzone", "swing", "umkehr"):
+        return (2, 0)
+    return (1, 0)
+
+
+def _ebene_prio(k):
+    return {"6M": 3, "Tageschart": 2, "Intraday": 1}.get(k.get("ebene"), 0)
+
+
+def bestimme_chart_setup(entry_zeit, intraday_reihe=None, daily_reihe=None, aktueller_kurs=None):
+    """Charttechnik -> Setup -> Entry/Stop/TP1/TP2 -> CRV.
+
+    Entry und Stop stammen aus vorhandenen Supportstrukturen bzw. dem bestehenden
+    bestätigten Bounce-Setup. TP1/TP2 stammen ausschließlich aus charttechnischen
+    Widerstands-/Strukturzielen. CRV ist erst danach eine Zulassungsschranke.
+    """
+    kandidaten = _chartkandidaten_fuer_setup(entry_zeit, intraday_reihe, daily_reihe)
+    if aktueller_kurs is None:
+        reihe = intraday_reihe if intraday_reihe is not None else daily_reihe
+        if reihe is None or len(reihe) == 0:
+            return {"status": "kein_setup", "grund": "keine_kursdaten", "kandidaten": kandidaten}
+        aktueller_kurs = float(reihe["Close"].iloc[-1])
+    else:
+        aktueller_kurs = float(aktueller_kurs)
+
+    supports = [k for k in kandidaten if k["seite"] == "support" and k["preis"] < aktueller_kurs]
+    if not supports:
+        return {"status": "kein_setup", "grund": "keine_charttechnische_supportstruktur_unter_entry", "kandidaten": kandidaten}
+
+    # Der Entry bleibt der tatsächliche bestätigte Schlusskurs des Setups. Die
+    # Supportstruktur begründet ihn; wir verschieben ihn nicht mathematisch.
+    entry = aktueller_kurs
+    stop_kandidat = max(supports, key=lambda k: (k["preis"], _struktur_prio(k), _ebene_prio(k)))
+    stop = float(stop_kandidat["preis"])
+    risiko = entry - stop
+    if risiko <= 0:
+        return {"status": "kein_setup", "grund": "support_nicht_unter_entry", "kandidaten": kandidaten}
+
+    widerstaende = [k for k in kandidaten if k["seite"] == "widerstand" and k["preis"] > entry]
+    for k in widerstaende:
+        k["crv"] = (float(k["preis"]) - entry) / risiko
+        if k["crv"] <= 1.0:
+            k["verworfen"] = True
+            k["verwerfungsgrund"] = "CRV <= 1"
+        else:
+            k["verworfen"] = False
+            k["verwerfungsgrund"] = None
+
+    gueltig_tp1 = [k for k in widerstaende if k["crv"] > 1.0]
+    if not gueltig_tp1:
+        return {"status": "kein_trade", "grund": "kein_charttechnisches_tp1_mit_crv_gt_1",
+                "entry": entry, "stop": stop, "stop_quelle": stop_kandidat["quelle"],
+                "kandidaten": kandidaten, "tp1_kandidaten": widerstaende}
+
+    # Echte Hierarchie: Strukturart -> Zeitebene -> 1,3-2,2R als Referenzbereich -> Abstand zu 2R.
+    def tp1_key(k):
+        bevorzugt = 1 if 1.3 <= k["crv"] <= 2.2 else 0
+        return (_struktur_prio(k), _ebene_prio(k), bevorzugt, -abs(k["crv"] - 2.0))
+
+    tp1_kandidat = max(gueltig_tp1, key=tp1_key)
+    tp1 = float(tp1_kandidat["preis"])
+
+    tp2_kandidaten = [k for k in gueltig_tp1 if k["preis"] > tp1 + 1e-6 and k["crv"] >= 2.0]
+    if not tp2_kandidaten:
+        return {"status": "kein_trade", "grund": "kein_charttechnisches_tp2_mit_crv_ge_2",
+                "entry": entry, "stop": stop, "stop_quelle": stop_kandidat["quelle"],
+                "tp1": tp1, "tp1_quelle": tp1_kandidat["quelle"], "tp1_crv": tp1_kandidat["crv"],
+                "kandidaten": kandidaten, "tp1_kandidaten": widerstaende, "tp2_kandidaten": []}
+
+    tp2_kandidat = max(tp2_kandidaten, key=lambda k: (_struktur_prio(k), _ebene_prio(k), -k["preis"]))
+    return {
+        "status": "trade_zulaessig" if tp1_kandidat["crv"] > 1.0 else "kein_trade",
+        "entry": entry,
+        "stop": stop,
+        "stop_quelle": stop_kandidat["quelle"],
+        "tp1": tp1,
+        "tp1_quelle": tp1_kandidat["quelle"],
+        "tp1_crv": float(tp1_kandidat["crv"]),
+        "tp2": float(tp2_kandidat["preis"]),
+        "tp2_quelle": tp2_kandidat["quelle"],
+        "tp2_crv": float(tp2_kandidat["crv"]),
+        "kandidaten": kandidaten,
+        "tp1_kandidaten": widerstaende,
+        "tp2_kandidaten": tp2_kandidaten,
+    }
+
+
+def bestimme_strukturelle_tps(entry, stop, entry_zeit, intraday_reihe=None, daily_reihe=None):
+    """Kompatibilitätswrapper: keine mathematischen Fallback-Ziele."""
+    setup = bestimme_chart_setup(entry_zeit, intraday_reihe, daily_reihe, aktueller_kurs=float(entry))
+    if setup.get("status") != "trade_zulaessig":
+        return {
+            "status": setup.get("status", "kein_trade"),
+            "grund": setup.get("grund", "kein_charttechnisches_setup"),
+            "tp1": None, "tp2": None,
+            "tp1_quelle": None, "tp2_quelle": None,
+            "tp1_crv": None, "tp2_crv": None,
+            "kandidaten": setup.get("kandidaten", []),
+        }
+    return setup
 
 def baue_chart(intraday_reihe, pivots, strukturzonen=None, range_ausbruch_status=None, pfad="chart.png"):
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
@@ -2842,8 +2712,8 @@ def formatiere_vorschau(status, fmt):
         )
     zeile = (
         f"Vorschau (kein aktives Signal): Einstieg {einstieg_label}, Stop {fmt(vorschau['stop'])} USD, "
-        f"TP1 {fmt(vorschau['tp1'])} USD (CRV {crv1:.1f}, {vorschau.get('tp1_quelle', 'kein charttechnisches TP')}), "
-        f"TP2 {fmt(vorschau['tp2'])} USD (CRV {crv2:.1f}, {vorschau.get('tp2_quelle', 'kein charttechnisches TP2')})"
+        f"TP1 {fmt(vorschau['tp1'])} USD (CRV {crv1:.1f}, {vorschau.get('tp1_quelle', '2R-Fallback')}), "
+        f"TP2 {fmt(vorschau['tp2'])} USD (CRV {crv2:.1f}, {vorschau.get('tp2_quelle', '3R-Fallback')})"
     )
     if vorschau.get("trend_erfuellt") is False:
         zeile += ". Trendbedingung aktuell NICHT erfüllt - Vorschau daher rein illustrativ, kein gültiges Setup."
@@ -2900,8 +2770,8 @@ def formatiere_positionstrading(status):
             f"({status['haltedauer_tage']} Tage). Einstieg {de_zahl(status['einstieg'])} USD, "
             f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
             f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD "
-            f"[{status.get('tp1_quelle', 'kein charttechnisches TP')}], TP2 {de_zahl(status['tp2'])} USD "
-            f"[{status.get('tp2_quelle', 'kein charttechnisches TP2')}] ({stufe_text})."
+            f"[{status.get('tp1_quelle', '2R-Fallback')}], TP2 {de_zahl(status['tp2'])} USD "
+            f"[{status.get('tp2_quelle', '3R-Fallback')}] ({stufe_text})."
         )
     else:
         letzter = status.get("letzter_trade")
@@ -2951,8 +2821,8 @@ def formatiere_range_ausbruch(status):
             f"({status['haltedauer_stunden']:.0f} Std.). Einstieg {de_zahl(status['einstieg'])} USD, "
             f"aktuell {de_zahl(status['aktueller_kurs'])} USD ({de_zahl(status['unrealisiert_pct'], vorzeichen=True)}% unrealisiert). "
             f"Stop bei {de_zahl(status['stop'])} USD, TP1 {de_zahl(status['tp1'])} USD "
-            f"[{status.get('tp1_quelle', 'kein charttechnisches TP')}], TP2 {de_zahl(status['tp2'])} USD "
-            f"[{status.get('tp2_quelle', 'kein charttechnisches TP2')}] ({stufe_text})."
+            f"[{status.get('tp1_quelle', '2R-Fallback')}], TP2 {de_zahl(status['tp2'])} USD "
+            f"[{status.get('tp2_quelle', '3R-Fallback')}] ({stufe_text})."
         )
     else:
         letzter = status.get("letzter_trade")
@@ -3364,9 +3234,8 @@ def berechne_positionstrading_status(intraday_reihe=None):
     TP1/TP2-Berechnung ist hier um die mehrstufige Chartstruktur erweitert:
     - Nur Long. Trend: rollierende Regression über die letzten 50 Handelstage
       (nur bis gestern). Einstieg: bestätigter Bounce an einem rollierenden
-      10-Tage-Swing-Tief. Stop: nächstliegende charttechnische Supportstruktur
-      knapp darunter. TP1/TP2 ausschließlich aus charttechnischen Widerstands-
-      strukturen; danach CRV-Prüfung. Kein charttechnisches Ziel => kein Trade.
+      10-Tage-Swing-Tief. Stop: dieses Tief, fest. TP1/TP2 bevorzugt strukturelle
+      Widerstände mit CRV > 1 (Intraday -> Tageschart -> 6M), sonst 2R/3R.
       Stufenregel: TP1->Breakeven, TP2->TP1-Niveau, danach kontinuierliches
       Nachziehen am Swing-Tief. Cooldown 3 Handelstage nach einem Stop.
 
@@ -3408,19 +3277,14 @@ def berechne_positionstrading_status(intraday_reihe=None):
                 ref_tief = float(ref_tief)
                 if tief <= ref_tief and schluss > ref_tief:
                     entry = schluss
-                    stop_info = bestimme_strukturellen_stop(
-                        entry, datum, intraday_reihe=intraday_reihe, daily_reihe=daily
-                    )
-                    if stop_info is None:
-                        continue
-                    stop = float(stop_info["stop"])
+                    stop = ref_tief
                     if stop < entry:
                         tp_info = bestimme_strukturelle_tps(
                             entry, stop, datum,
                             intraday_reihe=intraday_reihe,
                             daily_reihe=daily,
                         )
-                        if tp_info.get("status") != "ok":
+                        if tp_info.get("status") != "trade_zulaessig":
                             continue
                         tp1 = tp_info["tp1"]
                         tp2 = tp_info["tp2"]
@@ -3495,10 +3359,10 @@ def berechne_positionstrading_status(intraday_reihe=None):
             "signal": heutiges_signal,
             "einstieg_datum": entry_datum, "einstieg": entry,
             "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe,
-            "tp1_quelle": tp_info.get("tp1_quelle"),
-            "tp2_quelle": tp_info.get("tp2_quelle"),
-            "tp1_crv": tp_info.get("tp1_crv"),
-            "tp2_crv": tp_info.get("tp2_crv"),
+            "tp1_quelle": tp_info.get("tp1_quelle", "2R-Fallback"),
+            "tp2_quelle": tp_info.get("tp2_quelle", "3R-Fallback"),
+            "tp1_crv": tp_info.get("tp1_crv", 2.0),
+            "tp2_crv": tp_info.get("tp2_crv", 3.0),
             "aktueller_kurs": letzter_kurs,
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_tage": (letztes_datum - entry_datum).days,
@@ -3512,25 +3376,26 @@ def berechne_positionstrading_status(intraday_reihe=None):
         if not (letzter_abgeschlossener_trade and letzter_abgeschlossener_trade["ausstieg_datum"] == letztes_datum):
             heutiges_signal = "KEIN_SIGNAL"
 
-        # Vorschau: auch hier wird der Stop charttechnisch aus Supportstrukturen
-        # bestimmt. Der aktuelle Kurs dient nur als hypothetischer Entry für die
-        # Vorschau; ein echter Entry entsteht erst durch das bestätigte Setup.
+        # Vorschau, falls gerade keine Position offen ist: der STOP ist exakt
+        # bekannt (aktuelles 10-Tage-Tief), der EINSTIEG dagegen nicht - der
+        # echte Trigger braucht einen Bounce (Berührung + Schluss darüber),
+        # dessen genauer Schlusskurs vorher unbekannt ist. Als Näherung dient
+        # der aktuelle Kurs als Platzhalter-Einstieg - klar als Näherung
+        # gekennzeichnet, nicht als tatsächlicher künftiger Preis.
         vorschau = None
+        ref_tief_aktuell = swing_tief_referenz.get(letztes_datum)
         trend_aktuell = aufwaertstrend.get(letztes_datum)
-        stop_info = bestimme_strukturellen_stop(
-            letzter_kurs, letztes_datum, intraday_reihe=intraday_reihe, daily_reihe=daily
-        )
-        if stop_info is not None and stop_info["stop"] < letzter_kurs:
-            tp_info = bestimme_strukturelle_tps(
-                letzter_kurs, stop_info["stop"], letztes_datum,
-                intraday_reihe=intraday_reihe,
-                daily_reihe=daily,
-            )
-            if tp_info.get("status") == "ok":
+        if pd.notna(ref_tief_aktuell):
+            ref_tief_aktuell = float(ref_tief_aktuell)
+            if ref_tief_aktuell < letzter_kurs:
+                tp_info = bestimme_strukturelle_tps(
+                    letzter_kurs, ref_tief_aktuell, letztes_datum,
+                    intraday_reihe=intraday_reihe,
+                    daily_reihe=daily,
+                )
                 vorschau = {
-                    "stop": float(stop_info["stop"]),
+                    "stop": ref_tief_aktuell,
                     "stop_praezise": True,
-                    "stop_quelle": stop_info["quelle"],
                     "hypothetischer_einstieg": letzter_kurs,
                     "tp1": tp_info["tp1"],
                     "tp2": tp_info["tp2"],
@@ -3595,7 +3460,7 @@ def berechne_positionstrading_status(intraday_reihe=None):
 def berechne_range_ausbruch_status(daily_lang=None):
     """Simuliert das Range-Ausbruch-Signal (1h, rollierendes 24h-Hoch/-Tief,
     TP1/TP2: strukturelles Ziel mit CRV > 1 (Intraday -> Tageschart -> 6M),
-    ohne charttechnisches Ziel kein Trade) über die letzten
+    sonst 2R/3R-Fallback) über die letzten
     RANGE_AUSBRUCH_HISTORIE_TAGE Tage und liefert den aktuellen Stand -
     holt dafür genau EINE zusätzliche Twelve-Data-Anfrage (siehe Kommentar
     bei den RANGE_AUSBRUCH_*-Konstanten weiter oben, warum nicht die volle
@@ -3632,19 +3497,14 @@ def berechne_range_ausbruch_status(daily_lang=None):
                 continue
             if pd.notna(ref_hoch) and pd.notna(ref_tief) and schluss > float(ref_hoch) and vola_ok:
                 entry = schluss
-                stop_info = bestimme_strukturellen_stop(
-                    entry, zeit, intraday_reihe=stunden, daily_reihe=daily_lang
-                )
-                if stop_info is None:
-                    continue
-                stop = float(stop_info["stop"])
+                stop = float(ref_tief)
                 if stop < entry:
                     tp_info = bestimme_strukturelle_tps(
                         entry, stop, zeit,
                         intraday_reihe=stunden,
                         daily_reihe=daily_lang,
                     )
-                    if tp_info.get("status") != "ok":
+                    if tp_info.get("status") != "trade_zulaessig":
                         continue
                     tp1 = tp_info["tp1"]
                     tp2 = tp_info["tp2"]
@@ -3702,10 +3562,10 @@ def berechne_range_ausbruch_status(daily_lang=None):
             "signal": heutiges_signal,
             "einstieg_zeit": entry_zeit, "einstieg": entry,
             "stop": stop, "tp1": tp1, "tp2": tp2, "stufe": stufe,
-            "tp1_quelle": tp_info.get("tp1_quelle"),
-            "tp2_quelle": tp_info.get("tp2_quelle"),
-            "tp1_crv": tp_info.get("tp1_crv"),
-            "tp2_crv": tp_info.get("tp2_crv"),
+            "tp1_quelle": tp_info.get("tp1_quelle", "2R-Fallback"),
+            "tp2_quelle": tp_info.get("tp2_quelle", "3R-Fallback"),
+            "tp1_crv": tp_info.get("tp1_crv", 2.0),
+            "tp2_crv": tp_info.get("tp2_crv", 3.0),
             "aktueller_kurs": letzter_kurs,
             "unrealisiert_pct": (letzter_kurs - entry) / entry * 100,
             "haltedauer_stunden": (letzte_zeit - entry_zeit).total_seconds() / 3600,
