@@ -800,4 +800,4 @@ def briefing_block(days_ahead: int = 7):
             lines.append(f"{icon} {e['name']} – {_display_when(e, now)} | Quelle: {e['source']}")
 
     lines.append("Hinweis: Termine können Gold/Volatilität deutlich bewegen. Kein automatisches Trading-Verbot.")
-    return "\n".join(lines), future
+    return "\n".join(lines), events
