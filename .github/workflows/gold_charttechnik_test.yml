@@ -1,1 +1,37 @@
+name: Gold Charttechnik Test
 
+on:
+  workflow_dispatch:
+
+jobs:
+  charttechnik_test:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Testversion statisch kompilieren
+        run: |
+          python -m py_compile test/charttechnik/mini_daily_gold.py
+          python -m py_compile test/charttechnik/run_charttechnik_test.py
+
+      - name: Echten Gold-Charttest ausführen
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: python test/charttechnik/run_charttechnik_test.py
+
+      - name: Testergebnis als Artefakt sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-charttechnik-test-result
+          path: charttechnik_test_result.json
+          if-no-files-found: error
