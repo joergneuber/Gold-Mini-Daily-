@@ -1,7 +1,7 @@
 """Isolierter Diagnoselauf fuer die Charttechnik-Testversion.
 
 Keine Trade-Alerts, keine Mails, keine Produktionsdateien.
-Verwendet die Testversion aus test/charttechnik/mini_daily_gold.py und
+Verwendet die Testversion aus test/Charttechnik/mini_daily_gold.py und
 laedt die echten Gold-Daten ueber Twelve Data.
 """
 import importlib.util
@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "test" / "charttechnik" / "mini_daily_gold.py"
+MODULE_PATH = ROOT / "test" / "Charttechnik" / "mini_daily_gold.py"
 
 spec = importlib.util.spec_from_file_location("mini_daily_gold_charttechnik_test", MODULE_PATH)
 mod = importlib.util.module_from_spec(spec)
