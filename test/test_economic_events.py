@@ -138,11 +138,12 @@ def test_lade_termine_integration_pipeline_runs_without_legacy_nameerror():
             "time_confirmed": True,
         },
     ]
+    test_today = dt.date.today()
     fake_ecb = [{
         "name": "EZB-Geldpolitische Sitzung",
         "priority": m.VERY_HIGH,
-        "datetime": "2026-09-25T00:00:00+02:00",
-        "date": "2026-09-25",
+        "datetime": f"{test_today.isoformat()}T00:00:00+02:00",
+        "date": test_today.isoformat(),
         "source": "ECB official calendar",
         "canonical": "ECB",
         "time_confirmed": False,
@@ -167,7 +168,7 @@ def test_lade_termine_integration_pipeline_runs_without_legacy_nameerror():
                 "valid FOMC event missing after integration pipeline")
         _assert(("FOMC / Fed-Zinsentscheid", "2026-11-18") not in names_dates,
                 "invalid FOMC date was not sanitized")
-        _assert(("EZB-Geldpolitische Sitzung", "2026-09-25") in names_dates,
+        _assert(("EZB-Geldpolitische Sitzung", test_today.isoformat()) in names_dates,
                 "today's unconfirmed ECB event was filtered out")
         _assert(("US CPI", "2026-09-30") in names_dates,
                 "BLS event missing after integration pipeline")
@@ -191,9 +192,9 @@ def test_gold_focus_has_no_directional_signal():
 
 
 def test_briefing_interface_remains_compatible():
-    today = dt.date(2026, 9, 25)
+    today = dt.date.today()
     events = [
-        {"name": "ADP: ADP Weekly Employment Change", "priority": "HIGH", "datetime": "2026-09-25T14:15:00+02:00", "date": today.isoformat(), "source": "ForexFactory (LIVE)", "canonical": "ADP", "time_confirmed": False},
+        {"name": "ADP: ADP Weekly Employment Change", "priority": "HIGH", "datetime": f"{today.isoformat()}T14:15:00+02:00", "date": today.isoformat(), "source": "ForexFactory (LIVE)", "canonical": "ADP", "time_confirmed": False},
         {"name": "FOMC / Fed-Zinsentscheid", "priority": "VERY_HIGH", "datetime": "2026-10-28T20:00:00+01:00", "date": "2026-10-28", "source": "Federal Reserve", "canonical": "FOMC", "time_confirmed": True},
     ]
     with patch.object(m, "lade_termine", return_value=(events, [])):
