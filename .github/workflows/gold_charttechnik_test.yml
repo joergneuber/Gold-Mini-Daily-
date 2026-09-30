@@ -20,14 +20,14 @@ jobs:
 
       - name: Testversion statisch kompilieren
         run: |
-          python -m py_compile test/charttechnik/mini_daily_gold.py
-          python -m py_compile test/charttechnik/run_charttechnik_test.py
+          python -m py_compile test/Charttechnik/mini_daily_gold.py
+          python -m py_compile test/Charttechnik/run_charttechnik_test.py
 
       - name: Echten Gold-Charttest ausführen
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           PYTHONPATH: ${{ github.workspace }}
-        run: python test/charttechnik/run_charttechnik_test.py
+        run: python test/Charttechnik/run_charttechnik_test.py
 
       - name: Testergebnis als Artefakt sichern
         uses: actions/upload-artifact@v4
