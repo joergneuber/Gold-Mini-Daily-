@@ -227,78 +227,6 @@ def _aktive_wendepunkt_kandidaten(reihe):
     }
 
 
-def _richtung_aus_kanal(kanal):
-    """Leitet die charttechnische Richtung ohne Score aus einer bestehenden
-    Kanal-/Formationsberechnung ab. Bei Dreiecken entscheidet die Steigung der
-    Mittellinie; bei expliziten Auf-/Abwärtsformationen das vorhandene Label."""
-    if not kanal:
-        return "UNBEKANNT", "keine_kanalstruktur"
-    formation = str(kanal.get("formation", kanal.get("typ", ""))).lower()
-    if "aufwärts" in formation or "aufwaerts" in formation:
-        return "AUFWÄRTS", "formation_aufwärts"
-    if "abwärts" in formation or "abwaerts" in formation:
-        return "ABWÄRTS", "formation_abwärts"
-    daten = kanal.get("daten") or kanal
-    oben = daten.get("obere_linie") if isinstance(daten, dict) else None
-    unten = daten.get("untere_linie") if isinstance(daten, dict) else None
-    if oben and unten:
-        mittel_steigung = (float(oben[0]) + float(unten[0])) / 2.0
-        if mittel_steigung > 1e-10:
-            return "AUFWÄRTS", "positive_mittellinien_steigung"
-        if mittel_steigung < -1e-10:
-            return "ABWÄRTS", "negative_mittellinien_steigung"
-    return "NEUTRAL", "keine_eindeutige_richtung"
-
-
-def _kanal_richtung(reihe, fenster, min_punkte):
-    if reihe is None or len(reihe) < max(10, min_punkte * 2 + 1):
-        return {"richtung": "UNBEKANNT", "grund": "zu_wenig_daten", "formation": None}
-    kanal = mod.finde_trendkanal(reihe, fenster=fenster, min_punkte=min_punkte)
-    if kanal is None:
-        x = mod.mdates.date2num(reihe.index)
-        steigung = float(mod.np.polyfit(x, reihe["Close"].values, 1)[0])
-        richtung = "AUFWÄRTS" if steigung > 0 else "ABWÄRTS" if steigung < 0 else "NEUTRAL"
-        return {"richtung": richtung, "grund": "lineare_regression_fallback", "formation": None, "steigung": steigung}
-    richtung, grund = _richtung_aus_kanal(kanal)
-    return {"richtung": richtung, "grund": grund, "formation": kanal.get("formation"), "daten": kanal}
-
-
-def _uebergeordnete_richtung(intraday, daily):
-    """Erzeugt die gewünschte 6M-/Tages-/Intraday-Richtungsdiagnose.
-
-    6M wird aus den letzten sechs Monaten der vorhandenen Tagesdaten abgeleitet,
-    Tageschart aus der vorhandenen Tagesreihe und Intraday aus der bestehenden
-    Intraday-Reihe. Es werden keine neuen Kursmarken erfunden und kein Score gebildet.
-    """
-    sechs_monate_start = daily.index[-1] - mod.pd.Timedelta(days=183)
-    sechs_monate = daily.loc[daily.index >= sechs_monate_start]
-    sechs = _kanal_richtung(sechs_monate, mod.LANGFRIST_KANAL_FENSTER, mod.LANGFRIST_KANAL_MIN_PUNKTE)
-    tages = _kanal_richtung(daily, mod.TAGESCHART_KANAL_FENSTER, mod.TAGESCHART_KANAL_MIN_PUNKTE)
-    intra = _kanal_richtung(intraday, mod.INTRADAY_KANAL_FENSTER, mod.INTRADAY_KANAL_MIN_PUNKTE)
-
-    grosse_abwaerts = sechs["richtung"] == "ABWÄRTS" and tages["richtung"] == "ABWÄRTS"
-    long_warnung = grosse_abwaerts
-    if grosse_abwaerts:
-        grund = "Long läuft gegen die übergeordnete Struktur."
-        long_setup = "Gegenbewegung / Counter-Trend"
-    elif sechs["richtung"] == "ABWÄRTS" or tages["richtung"] == "ABWÄRTS":
-        grund = "Übergeordnete Struktur teilweise abwärtsgerichtet; Long ist gegen mindestens eine höhere Zeitebene."
-        long_setup = "vorsichtige Gegenbewegung / Counter-Trend"
-    else:
-        grund = "Keine eindeutige übergeordnete Abwärtsstruktur in 6M und Tageschart."
-        long_setup = "Trend-Setup / normale Chartprüfung"
-
-    return {
-        "6M": sechs,
-        "Tageschart": tages,
-        "Intraday": intra,
-        "long_warnung": long_warnung,
-        "grund": grund,
-        "long_setup": long_setup,
-        "regel": "Long-Warnung bei gleichzeitig ABWÄRTS in 6M und Tageschart; kein Score und kein automatisches Long-Verbot.",
-    }
-
-
 def _bounce_confirmation(reihe, support_price, lookback=5):
     """Prueft einen abgeschlossenen Support-Bounce ohne Look-ahead."""
     if reihe is None or len(reihe) < 3:
@@ -322,6 +250,59 @@ def _bounce_confirmation(reihe, support_price, lookback=5):
                 "regel": "Low beruehrt/unterschreitet Support; spaeterer abgeschlossener Close schliesst wieder darueber.",
             }
     return {"bestaetigt": False, "grund": "touch_ohne_bestaetigungs_close_darueber"}
+
+
+def _richtung_aus_kanal(reihe, ebene):
+    """Leitet nur aus der vorhandenen Kanal-/Trendstruktur eine Richtung ab."""
+    if reihe is None or len(reihe) < 30:
+        return {"ebene": ebene, "richtung": "NEUTRAL", "grund": "zu_wenig_daten"}
+    info = mod.kanal_seit_wendepunkt(reihe)
+    if info is None:
+        return {"ebene": ebene, "richtung": "NEUTRAL", "grund": "keine_aktive_kanalstruktur"}
+    daten = info.get("daten")
+    if info.get("typ") == "kanal":
+        obere = float(daten["obere_linie"][0])
+        untere = float(daten["untere_linie"][0])
+        mittel = (obere + untere) / 2.0
+        if mittel < -1e-10:
+            richtung = "ABWAERTS"
+        elif mittel > 1e-10:
+            richtung = "AUFWAERTS"
+        else:
+            richtung = "NEUTRAL"
+        return {
+            "ebene": ebene,
+            "richtung": richtung,
+            "grund": f"aktive {daten.get('formation', 'Kanal')}struktur; Mittelliniensteigung {mittel:.8g}",
+            "formation": daten.get("formation"),
+            "obere_steigung": obere,
+            "untere_steigung": untere,
+        }
+    steigung = float(daten[0])
+    return {
+        "ebene": ebene,
+        "richtung": "AUFWAERTS" if steigung > 1e-10 else "ABWAERTS" if steigung < -1e-10 else "NEUTRAL",
+        "grund": f"aktive Trendstruktur; Steigung {steigung:.8g}",
+    }
+
+
+def _uebergeordnete_richtung(intraday, daily):
+    sechs_m = daily.loc[daily.index >= (daily.index[-1] - mod.pd.DateOffset(months=mod.LANGFRIST_MONATE))]
+    result = {
+        "6M": _richtung_aus_kanal(sechs_m, "6M"),
+        "Tageschart": _richtung_aus_kanal(daily, "Tageschart"),
+        "Intraday": _richtung_aus_kanal(intraday, "Intraday"),
+    }
+    gegen = [result[x]["richtung"] == "ABWAERTS" for x in ("6M", "Tageschart")]
+    warnung = all(gegen)
+    result["long_warnung"] = warnung
+    result["long_setup"] = "Gegenbewegung / Counter-Trend" if warnung else "normales Setup"
+    result["grund"] = (
+        "Long laeuft gegen die uebergeordnete Struktur."
+        if warnung
+        else "6M und Tageschart sind nicht gemeinsam abwaertsgerichtet; keine uebergeordnete Long-Warnung."
+    )
+    return result
 
 
 def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
@@ -389,6 +370,31 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
 
     stop_basis = stop_candidates[0] if stop_candidates else None
     stop = float(stop_basis["preis"]) if stop_basis else None
+
+    # Zusaetzliche Diagnose: neben dem naechsten Support wird auch der
+    # uebernaechste Support als moegliche strukturelle Stopbasis betrachtet.
+    # Wir erzwingen keinen kuenstlichen Dollar-/ATR-Puffer. Ein "minimal unter"
+    # dem Support ist nur dann numerisch bestimmbar, wenn die Quelle eine
+    # explizite Unterkante liefert; andernfalls bleibt der Level selbst die
+    # diagnostische Referenz.
+    stop_alternativen = []
+    if test_entry is not None:
+        for idx, support in enumerate(sorted(
+            [k for k in kandidaten if k.get("seite") == "support" and float(k["preis"]) < test_entry],
+            key=lambda k: float(k["preis"]), reverse=True,
+        )[:2], start=1):
+            stop_alternativen.append({
+                "rang_unter_entry": idx,
+                "support": support,
+                "stop_level": float(support["preis"]),
+                "stop_unterkante": support.get("untere_grenze"),
+                "minimal_unter_berechenbar": support.get("untere_grenze") is not None,
+                "begruendung": (
+                    "explizite Support-Unterkante vorhanden"
+                    if support.get("untere_grenze") is not None
+                    else "keine explizite Zonengrenze in der gelieferten Quelle; keinen kuenstlichen Puffer erfinden"
+                ),
+            })
     risiko = (test_entry - stop) if test_entry is not None and stop is not None else None
 
     tp_candidates = []
@@ -409,9 +415,27 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     gueltig_tp1 = [x for x in tp_candidates if not x["verworfen"]]
     tp1 = gueltig_tp1[0] if gueltig_tp1 else None
     tp2 = None
+    tp2_pruefung = None
     if tp1 is not None:
-        tp2_candidates = [x for x in gueltig_tp1 if x["preis"] > tp1["preis"] + 1e-6 and x["crv"] >= 2.0]
-        tp2 = tp2_candidates[0] if tp2_candidates else None
+        naechster = next(
+            (x for x in tp_candidates if x["preis"] > tp1["preis"] + 1e-6),
+            None,
+        )
+        if naechster is None:
+            tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
+        elif naechster["crv"] >= 2.0:
+            tp2 = naechster
+            tp2_pruefung = {
+                "status": "zugelassen",
+                "grund": "naechste_hoeherliegende_chartstruktur; CRV >= 2",
+                "kandidat": naechster,
+            }
+        else:
+            tp2_pruefung = {
+                "status": "verworfen",
+                "grund": "naechste_hoeherliegende_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen",
+                "kandidat": naechster,
+            }
     else:
         tp2_candidates = []
 
@@ -455,12 +479,27 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     hypo_gueltig = [x for x in hypothetische_tp_kandidaten if not x["verworfen"]]
     hypo_tp1 = hypo_gueltig[0] if hypo_gueltig else None
     hypo_tp2 = None
+    hypo_tp2_pruefung = None
     if hypo_tp1 is not None:
-        hypo_tp2_candidates = [
-            x for x in hypo_gueltig
-            if x["preis"] > hypo_tp1["preis"] + 1e-6 and x["crv"] >= 2.0
-        ]
-        hypo_tp2 = hypo_tp2_candidates[0] if hypo_tp2_candidates else None
+        hypo_naechster = next(
+            (x for x in hypothetische_tp_kandidaten if x["preis"] > hypo_tp1["preis"] + 1e-6),
+            None,
+        )
+        if hypo_naechster is None:
+            hypo_tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
+        elif hypo_naechster["crv"] >= 2.0:
+            hypo_tp2 = hypo_naechster
+            hypo_tp2_pruefung = {
+                "status": "zugelassen",
+                "grund": "naechste_hoeherliegende_chartstruktur; CRV >= 2",
+                "kandidat": hypo_naechster,
+            }
+        else:
+            hypo_tp2_pruefung = {
+                "status": "verworfen",
+                "grund": "naechste_hoeherliegende_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen",
+                "kandidat": hypo_naechster,
+            }
 
     hypothetische_tp_kette = {
         "diagnostisch_nur": True,
@@ -473,6 +512,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
         "hypothetischer_stop_regel": hypothetischer_stop_regel,
         "tp1": hypo_tp1,
         "tp2": hypo_tp2,
+        "tp2_pruefung": hypo_tp2_pruefung,
         "alle_tp_kandidaten": hypothetische_tp_kandidaten,
         "chart_hierarchie": [
             {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
@@ -494,14 +534,16 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "test_stop": stop,
             "basis": stop_basis,
             "alle_stop_support_kandidaten": stop_candidates,
+            "stop_alternativen_naechster_und_uebernaechster_support": stop_alternativen,
             "risiko": risiko,
-            "regel": "Stop wird aus der charttechnischen Supportstruktur abgeleitet; wenn die Quelle keine explizite Zonengrenze liefert, wird kein kuenstlicher Puffer erfunden. Die naechste Teststufe muss Zonengrenzen aus den Rohdaten liefern, bevor ein exakter Unter-Zonen-Stop berechnet wird.",
+            "regel": "Naechster und uebernaechster Support werden als Stopbasis diagnostiziert. Ein Stop minimal unter dem gewaehlten Support wird nur bei expliziter Unterkante berechnet; kein kuenstlicher ATR-/Dollar-Puffer.",
         },
         "tp": {
             "tp1": tp1,
             "tp2": tp2,
+            "tp2_pruefung": tp2_pruefung,
             "alle_tp_kandidaten": tp_candidates,
-            "regel": "Chart-Hierarchie bestimmt die Pruefreihenfolge; erst danach CRV. CRV > 1 ist nur Zulassung. TP2 = naechste hoehere charttechnische Struktur mit CRV >= 2. Kein Score, kein 2R/3R-Fallback.",
+            "regel": "Chart-Hierarchie bestimmt die Pruefreihenfolge; erst danach CRV. CRV > 1 ist nur Zulassung. TP2 = unmittelbar naechste hoehere charttechnische Struktur; wenn diese CRV < 2 hat, wird keine spaetere Struktur uebersprungen. Kein Score, kein 2R/3R-Fallback.",
         },
         "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
@@ -509,6 +551,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "regel": "Historischer Rollenwechsel wird nur verwendet, solange die neue Rolle durch den aktuellen Schlusskurs nicht wieder gebrochen wurde.",
         },
         "aktiver_kanal": kanal_diag,
+        "uebergeordnete_richtung": _uebergeordnete_richtung(intraday, daily),
         "trade": {
             "status": "trade_zulaessig" if tp1 is not None else "verwerfen",
             "crv_tp1": tp1["crv"] if tp1 else None,
@@ -544,9 +587,7 @@ def main():
     # Die neue Strukturkette ist ab hier die EINZIGE Entscheidungsquelle.
     # bestimme_chart_setup() liefert nur noch die Roh-/Basisstrukturen; dessen
     # bereits berechnete Entry/Stop/TP-Werte werden bewusst NICHT verwendet.
-    struktur_richtung = _uebergeordnete_richtung(intraday, daily)
     structure_chain = _build_structure_chain(setup, intraday, daily, kurs)
-    structure_chain["uebergeordnete_richtung"] = struktur_richtung
 
     kanal_gesamt = mod.diagnostiziere_kanalvarianten(
         intraday, mod.INTRADAY_KANAL_FENSTER, mod.INTRADAY_KANAL_MIN_PUNKTE
@@ -571,15 +612,9 @@ def main():
                 "bestaetigungs_bars": rw.get("bestaetigungs_bars"),
             })
 
+    print("\n=== UEBERGEORDNETE RICHTUNG / LONG-WARNUNG ===")
+    print(json.dumps(_safe(structure_chain["uebergeordnete_richtung"]), ensure_ascii=False, indent=2, default=str))
     print("\n=== FINALES CHART-SETUP (NEUE STRUKTURKETTE) ===")
-    richtung = struktur_richtung
-    print("\nÜBERGEORDNETE RICHTUNG")
-    print(f"6M:         {richtung['6M']['richtung']}")
-    print(f"Tageschart: {richtung['Tageschart']['richtung']}")
-    print(f"Intraday:   {richtung['Intraday']['richtung']}")
-    print(f"LONG-WARNUNG: {'⚠️ JA' if richtung['long_warnung'] else 'NEIN'}")
-    print(f"Grund: {richtung['grund']}")
-    print(f"LONG-SETUP: {richtung['long_setup']}")
     print(json.dumps(_safe(structure_chain), ensure_ascii=False, indent=2, default=str))
     print("\n=== BASIS-CHARTANALYSE (NUR DIAGNOSTIK, NICHT ENTSCHEIDUNGSRELEVANT) ===")
     print(json.dumps(_safe(setup), ensure_ascii=False, indent=2, default=str))
