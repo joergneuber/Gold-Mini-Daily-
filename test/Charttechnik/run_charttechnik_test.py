@@ -138,18 +138,41 @@ def _struktur_rang(k):
     return 8, "sonstige_struktur"
 
 
-def _chart_hierarchie(kandidaten, entry):
-    """Liefert alle aktuell relevanten Widerstaende strikt nach Preisnaehe.
+def _charttechnischer_grund(k):
+    """Liefert nur dann einen gueltigen Chartgrund, wenn die Struktur selbst belegt ist.
 
-    Die Chartart/Zeitebene bleibt als Diagnose erhalten, bestimmt aber nicht mehr
-    das Ueberspringen eines naeheren Widerstands. Zuerst kommt der naechste
-    charttechnische Widerstand oberhalb des Entries, danach der naechste usw.;
-    erst fuer jeden Kandidaten wird das CRV berechnet.
+    CRV ist hier absichtlich NICHT Bestandteil der Pruefung. Ein Kandidat darf
+    nur wegen seiner charttechnischen Struktur in die CRV-Pruefung gelangen.
     """
-    oberhalb = [
-        k for k in kandidaten
-        if k.get("seite") == "widerstand" and float(k["preis"]) > entry
-    ]
+    preis = k.get("preis")
+    typ = str(k.get("typ") or "").strip()
+    ebene = str(k.get("ebene") or "").strip()
+    quelle = str(k.get("quelle") or "").strip()
+    if preis is None or not typ or not ebene or not quelle:
+        return False, "kein_vollstaendiger_charttechnischer_nachweis"
+    if not k.get("aktuelle_rolle_gueltig", True):
+        return False, "charttechnische_rolle_nicht_mehr_gueltig"
+    return True, f"{typ}; {ebene}; {quelle}"
+
+
+def _chart_hierarchie(kandidaten, entry):
+    """Sortiert gueltige Chartstrukturen strikt nach Preisnaehe.
+
+    Die Chartstruktur entscheidet, WELCHE Kandidaten geprueft werden.
+    Danach wird das CRV berechnet. Eine hoeher eingestufte Chartklasse darf
+    niemals einen naeheren gueltigen Widerstand ueberspringen.
+    """
+    oberhalb = []
+    for k in kandidaten:
+        if k.get("seite") != "widerstand" or float(k["preis"]) <= entry:
+            continue
+        gueltig, grund = _charttechnischer_grund(k)
+        if not gueltig:
+            continue
+        v = dict(k)
+        v["charttechnisch_gueltig"] = True
+        v["charttechnischer_grund"] = grund
+        oberhalb.append(v)
     return sorted(oberhalb, key=lambda k: float(k["preis"]))
 
 def _rollenwechsel_aktuell_gueltig(kandidat, aktueller_kurs):
@@ -376,32 +399,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             })
 
     stop_basis = stop_candidates[0] if stop_candidates else None
-    stop = None
-    stop_detail = None
-    if stop_basis:
-        lower = stop_basis.get("untere_grenze")
-        if lower is not None and float(lower) < float(stop_basis["preis"]):
-            # Explizite Support-Unterkante ist charttechnisch belastbarer als
-            # der Mittelpunkt/Referenzwert der Zone. Der Stop liegt minimal
-            # darunter; 0.01 ist nur der kleinste verwendete Preisabstand,
-            # kein ATR-/CRV-/Score-Puffer.
-            stop = float(lower) - 0.01
-            stop_detail = {
-                "methode": "explizite_support_unterkante_plus_minimaler_tick",
-                "support_referenz": float(stop_basis["preis"]),
-                "unterkante": float(lower),
-                "stop": stop,
-            }
-        else:
-            # Keine erfundene Unterkante: der Kandidat bleibt diagnostische
-            # Referenz; die uebernaechste Supportstruktur wird separat geprueft.
-            stop = float(stop_basis["preis"])
-            stop_detail = {
-                "methode": "support_referenz_nur_diagnostisch",
-                "support_referenz": stop,
-                "unterkante": None,
-                "stop": stop,
-            }
+    stop = float(stop_basis["preis"]) if stop_basis else None
 
     # Zusaetzliche Diagnose: neben dem naechsten Support wird auch der
     # uebernaechste Support als moegliche strukturelle Stopbasis betrachtet.
@@ -422,9 +420,9 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
                 "stop_unterkante": support.get("untere_grenze"),
                 "minimal_unter_berechenbar": support.get("untere_grenze") is not None,
                 "begruendung": (
-                    "explizite Support-Unterkante vorhanden"
+                    "explizite Support-Unterkante vorhanden; Stop kann minimal darunter liegen"
                     if support.get("untere_grenze") is not None
-                    else "keine explizite Zonengrenze in der gelieferten Quelle; keinen kuenstlichen Puffer erfinden"
+                    else "keine explizite Zonengrenze in der gelieferten Quelle; uebernaechsten Support/Kanal als alternative Invalidierungsstruktur pruefen"
                 ),
             })
     risiko = (test_entry - stop) if test_entry is not None and stop is not None else None
@@ -439,9 +437,11 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             row["crv"] = crv
             row["chart_rang"] = _struktur_rang(r)[0]
             row["chart_rang_begruendung"] = _struktur_rang(r)[1]
+            row["charttechnisch_gueltig"] = True
+            row["charttechnischer_grund"] = r.get("charttechnischer_grund")
             row["verworfen"] = crv <= 1.0
             row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
-            row["auswahlbegruendung"] = ("charttechnisch_erste_gueltige_struktur; CRV > 1" if crv > 1.0 else "charttechnische_struktur_geprueft; CRV <= 1")
+            row["auswahlbegruendung"] = ("charttechnischer_grund_vorhanden; CRV > 1" if crv > 1.0 else "charttechnischer_grund_vorhanden; CRV <= 1")
             tp_candidates.append(row)
 
     gueltig_tp1 = [x for x in tp_candidates if not x["verworfen"]]
@@ -449,13 +449,9 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     tp2 = None
     tp2_pruefung = None
     if tp1 is not None:
-        # TP2 ist preislich zwingend die unmittelbar naechste hoehere
-        # Chartstruktur nach TP1. Die Rangklasse von TP1 darf keine weiter
-        # entfernte Struktur derselben Klasse ueberspringen.
-        naechster = min(
+        naechster = next(
             (x for x in tp_candidates if x["preis"] > tp1["preis"] + 1e-6),
-            key=lambda x: x["preis"],
-            default=None,
+            None,
         )
         if naechster is None:
             tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
@@ -487,7 +483,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     hypothetischer_stop_basis = hypo_stop_candidates[0] if hypo_stop_candidates else None
     hypothetischer_stop = float(hypothetischer_stop_basis["preis"]) if hypothetischer_stop_basis else None
     hypothetischer_stop_regel = (
-        "naechste_gueltige_supportstruktur; keine kuenstliche zone/puffer-berechnung ohne explizite zonengrenzen"
+        "naechste_gueltige_supportstruktur; bei expliziter Unterkante minimal darunter, sonst uebernaechsten Support/Kanal als Invalidierung pruefen"
         if hypothetischer_stop_basis else "keine_gueltige_supportstruktur"
     )
     hypothetisches_risiko = (
@@ -506,9 +502,11 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             row["crv"] = crv
             row["chart_rang"] = _struktur_rang(r)[0]
             row["chart_rang_begruendung"] = _struktur_rang(r)[1]
+            row["charttechnisch_gueltig"] = True
+            row["charttechnischer_grund"] = r.get("charttechnischer_grund")
             row["verworfen"] = crv <= 1.0
             row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
-            row["auswahlbegruendung"] = ("charttechnisch_erste_gueltige_struktur; CRV > 1" if crv > 1.0 else "charttechnische_struktur_geprueft; CRV <= 1")
+            row["auswahlbegruendung"] = ("charttechnischer_grund_vorhanden; CRV > 1" if crv > 1.0 else "charttechnischer_grund_vorhanden; CRV <= 1")
             row["auswahlstufe"] = "TP1-erster-gueltiger" if crv > 1.0 else "vor_TP1_verworfen"
             hypothetische_tp_kandidaten.append(row)
 
@@ -517,12 +515,9 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     hypo_tp2 = None
     hypo_tp2_pruefung = None
     if hypo_tp1 is not None:
-        # Auch die hypothetische Diagnose darf keine Struktur ueberspringen:
-        # immer der unmittelbar naechste Preis oberhalb von TP1.
-        hypo_naechster = min(
+        hypo_naechster = next(
             (x for x in hypothetische_tp_kandidaten if x["preis"] > hypo_tp1["preis"] + 1e-6),
-            key=lambda x: x["preis"],
-            default=None,
+            None,
         )
         if hypo_naechster is None:
             hypo_tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
@@ -557,7 +552,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
             for k in _chart_hierarchie(kandidaten, hypothetischer_entry)
         ],
-        "regel": "Nur Diagnose der Widerstandskette. Naechster Preis zuerst, Chartart/Zeitebene als Begruendung, CRV danach. Kein Trade ohne bestaetigten charttechnischen Entry. CRV > 1 ist Zulassung, kein Score; TP2 ist die unmittelbar naechste hoehere Struktur mit CRV >= 2.",
+        "regel": "Charttechnischer Grund ist zwingend. Erst gueltige Chartstruktur und Preisnaehe bestimmen, danach CRV. CRV > 1 ist nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP2 ist die unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur deren Zulassungsfilter.",
     }
 
     return {
@@ -574,16 +569,15 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "basis": stop_basis,
             "alle_stop_support_kandidaten": stop_candidates,
             "stop_alternativen_naechster_und_uebernaechster_support": stop_alternativen,
-            "stop_detail": stop_detail,
             "risiko": risiko,
-            "regel": "Naechster und uebernaechster Support werden geprueft. Wenn eine echte Support-Unterkante geliefert wird, liegt der Stop minimal darunter (0.01); sonst bleibt der Support nur Referenz und der uebernaechste Support wird diagnostisch ausgewertet. Kein ATR-/CRV-/Score-Puffer.",
+            "regel": "Naechster und uebernaechster Support werden als Stopbasis diagnostiziert. Ein Stop minimal unter dem gewaehlten Support wird nur bei expliziter Unterkante berechnet; kein kuenstlicher ATR-/Dollar-Puffer.",
         },
         "tp": {
             "tp1": tp1,
             "tp2": tp2,
             "tp2_pruefung": tp2_pruefung,
             "alle_tp_kandidaten": tp_candidates,
-            "regel": "Alle aktuell gueltigen Widerstandskandidaten werden strikt nach Preis aufsteigend geprueft; Chartart/Zeitebene dient der Begruendung. Erst danach CRV. CRV > 1 ist nur Zulassung. TP2 = unmittelbar naechste hoehere Struktur; wenn diese CRV < 2 hat, wird keine spaetere Struktur uebersprungen. Kein Score, kein 2R/3R-Fallback.",
+            "regel": "Jeder Entry/Stop/TP benoetigt zuerst einen charttechnischen Grund. Widerstaende werden nach Preisnaehe geprueft; erst danach CRV. CRV > 1 ist nur Zulassung fuer TP1. TP2 = unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur Zulassungsfilter. Kein Score, kein 2R/3R-Fallback, kein Ueberspringen.",
         },
         "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
