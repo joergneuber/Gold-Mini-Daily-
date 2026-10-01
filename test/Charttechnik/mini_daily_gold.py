@@ -1858,14 +1858,19 @@ def bestimme_chart_setup(entry_zeit, intraday_reihe=None, daily_reihe=None, aktu
                 "entry": entry, "stop": stop, "stop_quelle": stop_kandidat["quelle"],
                 "kandidaten": kandidaten, "tp1_kandidaten": widerstaende}
 
-    # Echte Hierarchie: Strukturart -> Zeitebene -> 1,3-2,2R als Referenzbereich -> Abstand zu 2R.
-    def tp1_key(k):
-        bevorzugt = 1 if 1.3 <= k["crv"] <= 2.2 else 0
-        return (_struktur_prio(k), _ebene_prio(k), bevorzugt, -abs(k["crv"] - 2.0))
+    # Reine Chart-Hierarchie ohne Gewichtung: TP1 ist die erste gültige
+    # charttechnische Hürde oberhalb des Entries. Die Distanz zum Entry ist
+    # damit die primäre Reihenfolge; Strukturart und Zeitebene entscheiden
+    # ausschließlich bei praktisch gleichem Preis. Das CRV ist nur die
+    # Zulassungsschranke und kein Auswahlkriterium.
+    def tp_huerden_key(k):
+        return (float(k["preis"]), -_struktur_prio(k)[0], -_struktur_prio(k)[1], -_ebene_prio(k))
 
-    tp1_kandidat = max(gueltig_tp1, key=tp1_key)
+    tp1_kandidat = min(gueltig_tp1, key=tp_huerden_key)
     tp1 = float(tp1_kandidat["preis"])
 
+    # TP2 ist ausschließlich die nächste höhere charttechnische Hürde nach TP1
+    # mit CRV >= 2. Auch hier entscheidet die Nähe; es gibt keinen 3R-Fallback.
     tp2_kandidaten = [k for k in gueltig_tp1 if k["preis"] > tp1 + 1e-6 and k["crv"] >= 2.0]
     if not tp2_kandidaten:
         return {"status": "kein_trade", "grund": "kein_charttechnisches_tp2_mit_crv_ge_2",
@@ -1873,7 +1878,7 @@ def bestimme_chart_setup(entry_zeit, intraday_reihe=None, daily_reihe=None, aktu
                 "tp1": tp1, "tp1_quelle": tp1_kandidat["quelle"], "tp1_crv": tp1_kandidat["crv"],
                 "kandidaten": kandidaten, "tp1_kandidaten": widerstaende, "tp2_kandidaten": []}
 
-    tp2_kandidat = max(tp2_kandidaten, key=lambda k: (_struktur_prio(k), _ebene_prio(k), -k["preis"]))
+    tp2_kandidat = min(tp2_kandidaten, key=tp_huerden_key)
     return {
         "status": "trade_zulaessig" if tp1_kandidat["crv"] > 1.0 else "kein_trade",
         "entry": entry,
