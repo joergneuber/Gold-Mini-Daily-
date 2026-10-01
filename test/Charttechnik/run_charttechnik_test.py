@@ -156,24 +156,76 @@ def _charttechnischer_grund(k):
 
 
 def _chart_hierarchie(kandidaten, entry):
-    """Sortiert gueltige Chartstrukturen strikt nach Preisnaehe.
+    """Liefert ALLE Widerstandskandidaten preislich aufsteigend.
 
-    Die Chartstruktur entscheidet, WELCHE Kandidaten geprueft werden.
-    Danach wird das CRV berechnet. Eine hoeher eingestufte Chartklasse darf
-    niemals einen naeheren gueltigen Widerstand ueberspringen.
+    Die Preisreihenfolge bestimmt die Pruefreihenfolge. Ein Kandidat mit
+    ungueltiger aktueller Chartrolle bleibt fuer die Diagnose sichtbar, darf
+    aber niemals als TP verwendet werden. CRV wird erst fuer charttechnisch
+    gueltige Kandidaten als Zulassungsfilter ausgewertet.
     """
     oberhalb = []
     for k in kandidaten:
         if k.get("seite") != "widerstand" or float(k["preis"]) <= entry:
             continue
         gueltig, grund = _charttechnischer_grund(k)
-        if not gueltig:
-            continue
         v = dict(k)
-        v["charttechnisch_gueltig"] = True
+        v["charttechnisch_gueltig"] = bool(gueltig)
         v["charttechnischer_grund"] = grund
         oberhalb.append(v)
     return sorted(oberhalb, key=lambda k: float(k["preis"]))
+
+
+def _tp_kandidaten_diagnose(kandidaten, entry, stop, tp1_crv=1.0):
+    """Prueft jeden TP-Kandidaten in Preisreihenfolge.
+
+    Harte Regel: kein charttechnischer Grund -> kein TP, unabhaengig vom CRV.
+    Erst bei gueltiger Chartstruktur wird das CRV als nachgelagerter Filter
+    berechnet. Rollenwechsel mit aktueller Rolle SUPPORT sind daher niemals
+    gueltige Long-TP-Widerstaende.
+    """
+    risiko = (entry - stop) if stop is not None and entry > stop else None
+    rows = []
+    for r in _chart_hierarchie(kandidaten, entry):
+        preis = float(r["preis"])
+        row = _kandidat_view(r, entry, stop)
+        row["aktuelle_rolle_gueltig"] = bool(r.get("aktuelle_rolle_gueltig", True))
+        row["charttechnisch_gueltig"] = bool(r.get("charttechnisch_gueltig"))
+        row["charttechnischer_grund"] = r.get("charttechnischer_grund")
+        row["chart_rang"] = _struktur_rang(r)[0]
+        row["chart_rang_begruendung"] = _struktur_rang(r)[1]
+        if not row["charttechnisch_gueltig"]:
+            row["crv"] = None
+            row["verworfen"] = True
+            row["verwerfungsgrund"] = "kein_gueltiger_charttechnischer_grund"
+            row["auswahlbegruendung"] = "charttechnische_voraussetzung_nicht_erfuellt; CRV_nicht_entscheidungsrelevant"
+            row["auswahlstufe"] = "charttechnisch_verworfen"
+        elif risiko is None or risiko <= 0:
+            row["crv"] = None
+            row["verworfen"] = True
+            row["verwerfungsgrund"] = "kein_gueltiges_risiko_fuer_crv_berechenbar"
+            row["auswahlbegruendung"] = "charttechnisch_gueltig; CRV_nicht_berechenbar"
+            row["auswahlstufe"] = "crv_nicht_berechenbar"
+        else:
+            crv = (preis - entry) / risiko
+            row["crv"] = crv
+            row["verworfen"] = crv <= tp1_crv
+            row["verwerfungsgrund"] = f"CRV <= {tp1_crv:g}" if crv <= tp1_crv else None
+            row["auswahlbegruendung"] = (
+                f"charttechnischer_grund_vorhanden; CRV > {tp1_crv:g}"
+                if crv > tp1_crv else
+                f"charttechnischer_grund_vorhanden; CRV <= {tp1_crv:g}"
+            )
+            row["auswahlstufe"] = "TP1-erster-gueltiger" if crv > tp1_crv else "vor_TP1_verworfen"
+        rows.append(row)
+    # Nur der erste charttechnisch gueltige Kandidat mit CRV > 1 ist TP1.
+    erster = next((i for i, row in enumerate(rows)
+                   if row.get("charttechnisch_gueltig") and row.get("crv") is not None and row["crv"] > tp1_crv), None)
+    if erster is not None:
+        for i, row in enumerate(rows):
+            if i > erster and row.get("charttechnisch_gueltig") and row.get("crv") is not None and row["crv"] > tp1_crv:
+                row["auswahlstufe"] = "nach_TP1_nicht_ausgewaehlt"
+                row["auswahlbegruendung"] = "charttechnisch_gueltig; CRV > 1, aber TP1 bereits durch naehere gueltige Struktur bestimmt"
+    return rows
 
 def _rollenwechsel_aktuell_gueltig(kandidat, aktueller_kurs):
     """Prueft nur die aktuelle Rolle eines bereits bestaetigten Rollenwechsels.
@@ -214,13 +266,15 @@ def _aktive_kandidaten(kandidaten, aktueller_kurs):
             "typ": k.get("typ"),
             "ebene": k.get("ebene"),
             "urspruengliche_seite": k.get("seite"),
+            "aktuelle_seite": (k.get("rollenwechsel") or {}).get("neue_seite") or k.get("seite"),
             "aktuelle_rolle_gueltig": gueltig,
             "pruefung": grund,
         })
-        if gueltig:
-            if (k.get("rollenwechsel") or {}).get("neue_seite"):
-                v["seite"] = (k.get("rollenwechsel") or {}).get("neue_seite")
-            out.append(v)
+        if gueltig and (k.get("rollenwechsel") or {}).get("neue_seite"):
+            v["seite"] = (k.get("rollenwechsel") or {}).get("neue_seite")
+        # Auch ungueltige Rollenwechsel bleiben fuer die Vollstaendigkeitsdiagnose
+        # erhalten. Sie duerfen aber weder Entry/Stop noch TP bilden.
+        out.append(v)
     return out, diagnostik
 
 
@@ -357,11 +411,11 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     kandidaten = list(dedup.values())
 
     supports = sorted(
-        [k for k in kandidaten if k.get("seite") == "support" and float(k["preis"]) < kurs],
+        [k for k in kandidaten if k.get("seite") == "support" and k.get("aktuelle_rolle_gueltig", True) and float(k["preis"]) < kurs],
         key=lambda k: float(k["preis"]), reverse=True,
     )
     resistances = sorted(
-        [k for k in kandidaten if k.get("seite") == "widerstand" and float(k["preis"]) > kurs],
+        [k for k in kandidaten if k.get("seite") == "widerstand" and k.get("aktuelle_rolle_gueltig", True) and float(k["preis"]) > kurs],
         key=lambda k: float(k["preis"]),
     )
 
@@ -386,7 +440,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     stop_candidates = []
     if test_entry is not None:
         for support in sorted(
-            [k for k in kandidaten if k.get("seite") == "support" and float(k["preis"]) < test_entry],
+            [k for k in kandidaten if k.get("seite") == "support" and k.get("aktuelle_rolle_gueltig", True) and float(k["preis"]) < test_entry],
             key=lambda k: float(k["preis"]), reverse=True,
         ):
             stop_candidates.append({
@@ -410,7 +464,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     stop_alternativen = []
     if test_entry is not None:
         for idx, support in enumerate(sorted(
-            [k for k in kandidaten if k.get("seite") == "support" and float(k["preis"]) < test_entry],
+            [k for k in kandidaten if k.get("seite") == "support" and k.get("aktuelle_rolle_gueltig", True) and float(k["preis"]) < test_entry],
             key=lambda k: float(k["preis"]), reverse=True,
         )[:2], start=1):
             stop_alternativen.append({
@@ -429,47 +483,38 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
 
     tp_candidates = []
     if test_entry is not None and risiko and risiko > 0:
-        for r in _chart_hierarchie(kandidaten, test_entry):
-            preis = float(r["preis"])
-            crv = (preis - test_entry) / risiko
-            row = _kandidat_view(r, test_entry, stop)
-            row["aktuelle_rolle_gueltig"] = True
-            row["crv"] = crv
-            row["chart_rang"] = _struktur_rang(r)[0]
-            row["chart_rang_begruendung"] = _struktur_rang(r)[1]
-            row["charttechnisch_gueltig"] = True
-            row["charttechnischer_grund"] = r.get("charttechnischer_grund")
-            row["verworfen"] = crv <= 1.0
-            row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
-            row["auswahlbegruendung"] = ("charttechnischer_grund_vorhanden; CRV > 1" if crv > 1.0 else "charttechnischer_grund_vorhanden; CRV <= 1")
-            tp_candidates.append(row)
+        tp_candidates = _tp_kandidaten_diagnose(kandidaten, test_entry, stop, tp1_crv=1.0)
 
-    gueltig_tp1 = [x for x in tp_candidates if not x["verworfen"]]
+    gueltig_tp1 = [x for x in tp_candidates if x.get("charttechnisch_gueltig") and not x["verworfen"]]
     tp1 = gueltig_tp1[0] if gueltig_tp1 else None
     tp2 = None
     tp2_pruefung = None
     if tp1 is not None:
         naechster = next(
-            (x for x in tp_candidates if x["preis"] > tp1["preis"] + 1e-6),
+            (x for x in tp_candidates if x["preis"] > tp1["preis"] + 1e-6 and x.get("charttechnisch_gueltig")),
             None,
         )
         if naechster is None:
-            tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
-        elif naechster["crv"] >= 2.0:
+            tp2_pruefung = {"status": "keine_hoeherliegende_gueltige_chartstruktur"}
+        elif naechster.get("crv") is not None and naechster["crv"] >= 2.0:
             tp2 = naechster
+            tp2["auswahlstufe"] = "TP2-naechste-gueltige-struktur"
+            tp2["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2"
             tp2_pruefung = {
                 "status": "zugelassen",
-                "grund": "naechste_hoeherliegende_chartstruktur; CRV >= 2",
+                "grund": "naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2",
                 "kandidat": naechster,
             }
         else:
+            naechster["verworfen"] = True
+            naechster["verwerfungsgrund"] = "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen"
+            naechster["auswahlstufe"] = "TP2-verworfen"
+            naechster["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV < 2"
             tp2_pruefung = {
                 "status": "verworfen",
-                "grund": "naechste_hoeherliegende_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen",
+                "grund": "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen",
                 "kandidat": naechster,
             }
-    else:
-        tp2_candidates = []
 
     # HYPOTHETISCHE TP-KETTE: reine Diagnose, niemals Trade-Auswahl.
     # Sie verwendet den aktuellen Kurs nur als hypothetischen Entry, damit TP1/TP2
@@ -477,7 +522,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     # vorliegt. Es wird dadurch KEIN Trade erzeugt.
     hypothetischer_entry = float(kurs)
     hypo_stop_candidates = sorted(
-        [k for k in kandidaten if k.get("seite") == "support" and float(k["preis"]) < hypothetischer_entry],
+        [k for k in kandidaten if k.get("seite") == "support" and k.get("aktuelle_rolle_gueltig", True) and float(k["preis"]) < hypothetischer_entry],
         key=lambda k: float(k["preis"]), reverse=True,
     )
     hypothetischer_stop_basis = hypo_stop_candidates[0] if hypo_stop_candidates else None
@@ -494,44 +539,39 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
 
     hypothetische_tp_kandidaten = []
     if hypothetisches_risiko and hypothetisches_risiko > 0:
-        for r in _chart_hierarchie(kandidaten, hypothetischer_entry):
-            preis = float(r["preis"])
-            crv = (preis - hypothetischer_entry) / hypothetisches_risiko
-            row = _kandidat_view(r, hypothetischer_entry, hypothetischer_stop)
-            row["aktuelle_rolle_gueltig"] = True
-            row["crv"] = crv
-            row["chart_rang"] = _struktur_rang(r)[0]
-            row["chart_rang_begruendung"] = _struktur_rang(r)[1]
-            row["charttechnisch_gueltig"] = True
-            row["charttechnischer_grund"] = r.get("charttechnischer_grund")
-            row["verworfen"] = crv <= 1.0
-            row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
-            row["auswahlbegruendung"] = ("charttechnischer_grund_vorhanden; CRV > 1" if crv > 1.0 else "charttechnischer_grund_vorhanden; CRV <= 1")
-            row["auswahlstufe"] = "TP1-erster-gueltiger" if crv > 1.0 else "vor_TP1_verworfen"
-            hypothetische_tp_kandidaten.append(row)
+        hypothetische_tp_kandidaten = _tp_kandidaten_diagnose(
+            kandidaten, hypothetischer_entry, hypothetischer_stop, tp1_crv=1.0
+        )
 
-    hypo_gueltig = [x for x in hypothetische_tp_kandidaten if not x["verworfen"]]
+    hypo_gueltig = [x for x in hypothetische_tp_kandidaten if x.get("charttechnisch_gueltig") and not x["verworfen"]]
     hypo_tp1 = hypo_gueltig[0] if hypo_gueltig else None
     hypo_tp2 = None
     hypo_tp2_pruefung = None
     if hypo_tp1 is not None:
         hypo_naechster = next(
-            (x for x in hypothetische_tp_kandidaten if x["preis"] > hypo_tp1["preis"] + 1e-6),
+            (x for x in hypothetische_tp_kandidaten
+             if x["preis"] > hypo_tp1["preis"] + 1e-6 and x.get("charttechnisch_gueltig")),
             None,
         )
         if hypo_naechster is None:
-            hypo_tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
-        elif hypo_naechster["crv"] >= 2.0:
+            hypo_tp2_pruefung = {"status": "keine_hoeherliegende_gueltige_chartstruktur"}
+        elif hypo_naechster.get("crv") is not None and hypo_naechster["crv"] >= 2.0:
             hypo_tp2 = hypo_naechster
+            hypo_tp2["auswahlstufe"] = "TP2-naechste-gueltige-struktur"
+            hypo_tp2["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2"
             hypo_tp2_pruefung = {
                 "status": "zugelassen",
-                "grund": "naechste_hoeherliegende_chartstruktur; CRV >= 2",
+                "grund": "naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2",
                 "kandidat": hypo_naechster,
             }
         else:
+            hypo_naechster["verworfen"] = True
+            hypo_naechster["verwerfungsgrund"] = "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen"
+            hypo_naechster["auswahlstufe"] = "TP2-verworfen"
+            hypo_naechster["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV < 2"
             hypo_tp2_pruefung = {
                 "status": "verworfen",
-                "grund": "naechste_hoeherliegende_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen",
+                "grund": "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen",
                 "kandidat": hypo_naechster,
             }
 
@@ -552,11 +592,15 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
             for k in _chart_hierarchie(kandidaten, hypothetischer_entry)
         ],
-        "regel": "Charttechnischer Grund ist zwingend. Erst gueltige Chartstruktur und Preisnaehe bestimmen, danach CRV. CRV > 1 ist nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP2 ist die unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur deren Zulassungsfilter.",
+        "regel": "Charttechnischer Grund ist zwingend. Aktuelle Chartrolle und Preisnaehe bestimmen die Kandidaten; erst danach wird CRV berechnet. CRV > 1 ist nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP2 ist die unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur deren Zulassungsfilter. Ein Rollenwechsel Widerstand->Support ist fuer einen Long-TP kein Widerstand mehr.",
     }
 
+    richtung = _uebergeordnete_richtung(intraday, daily)
     return {
         "kurs": kurs,
+        "uebergeordnete_richtung": richtung,
+        "long_warnung": richtung.get("long_warnung"),
+        "long_setup": richtung.get("long_setup"),
         "entry": {
             "test_entry": test_entry,
             "status": "charttechnisch_bestaetigt" if entry_basis else "kein_bestaetigter_entry",
@@ -577,7 +621,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "tp2": tp2,
             "tp2_pruefung": tp2_pruefung,
             "alle_tp_kandidaten": tp_candidates,
-            "regel": "Jeder Entry/Stop/TP benoetigt zuerst einen charttechnischen Grund. Widerstaende werden nach Preisnaehe geprueft; erst danach CRV. CRV > 1 ist nur Zulassung fuer TP1. TP2 = unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur Zulassungsfilter. Kein Score, kein 2R/3R-Fallback, kein Ueberspringen.",
+            "regel": "Jeder Entry/Stop/TP benoetigt zuerst einen charttechnischen Grund und eine aktuell gueltige Chartrolle. Widerstaende werden nach Preisnaehe geprueft; erst danach CRV. CRV > 1 ist nur Zulassung fuer TP1. TP2 = unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur Zulassungsfilter. Kein Score, kein 2R/3R-Fallback, kein Ueberspringen. Widerstand->Support darf nicht als Long-TP verwendet werden.",
         },
         "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
@@ -585,7 +629,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "regel": "Historischer Rollenwechsel wird nur verwendet, solange die neue Rolle durch den aktuellen Schlusskurs nicht wieder gebrochen wurde.",
         },
         "aktiver_kanal": kanal_diag,
-        "uebergeordnete_richtung": _uebergeordnete_richtung(intraday, daily),
+        "uebergeordnete_richtung": richtung,
         "trade": {
             "status": "trade_zulaessig" if tp1 is not None else "verwerfen",
             "crv_tp1": tp1["crv"] if tp1 else None,
@@ -665,6 +709,9 @@ def main():
         "realtime": kurs,
         "intraday_end": str(intraday.index[-1]),
         "daily_end": str(daily.index[-1]),
+        "uebergeordnete_richtung": _safe(structure_chain["uebergeordnete_richtung"]),
+        "long_warnung": structure_chain.get("long_warnung"),
+        "long_setup": structure_chain.get("long_setup"),
         # EINZIGE Entscheidungsquelle fuer das Test-Setup.
         "chart_setup": _safe(structure_chain),
         # Alte Funktion nur als Roh-/Diagnosequelle; ihre Auswahlwerte werden
