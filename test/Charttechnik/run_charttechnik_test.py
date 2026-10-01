@@ -227,6 +227,78 @@ def _aktive_wendepunkt_kandidaten(reihe):
     }
 
 
+def _richtung_aus_kanal(kanal):
+    """Leitet die charttechnische Richtung ohne Score aus einer bestehenden
+    Kanal-/Formationsberechnung ab. Bei Dreiecken entscheidet die Steigung der
+    Mittellinie; bei expliziten Auf-/Abwärtsformationen das vorhandene Label."""
+    if not kanal:
+        return "UNBEKANNT", "keine_kanalstruktur"
+    formation = str(kanal.get("formation", kanal.get("typ", ""))).lower()
+    if "aufwärts" in formation or "aufwaerts" in formation:
+        return "AUFWÄRTS", "formation_aufwärts"
+    if "abwärts" in formation or "abwaerts" in formation:
+        return "ABWÄRTS", "formation_abwärts"
+    daten = kanal.get("daten") or kanal
+    oben = daten.get("obere_linie") if isinstance(daten, dict) else None
+    unten = daten.get("untere_linie") if isinstance(daten, dict) else None
+    if oben and unten:
+        mittel_steigung = (float(oben[0]) + float(unten[0])) / 2.0
+        if mittel_steigung > 1e-10:
+            return "AUFWÄRTS", "positive_mittellinien_steigung"
+        if mittel_steigung < -1e-10:
+            return "ABWÄRTS", "negative_mittellinien_steigung"
+    return "NEUTRAL", "keine_eindeutige_richtung"
+
+
+def _kanal_richtung(reihe, fenster, min_punkte):
+    if reihe is None or len(reihe) < max(10, min_punkte * 2 + 1):
+        return {"richtung": "UNBEKANNT", "grund": "zu_wenig_daten", "formation": None}
+    kanal = mod.finde_trendkanal(reihe, fenster=fenster, min_punkte=min_punkte)
+    if kanal is None:
+        x = mod.mdates.date2num(reihe.index)
+        steigung = float(mod.np.polyfit(x, reihe["Close"].values, 1)[0])
+        richtung = "AUFWÄRTS" if steigung > 0 else "ABWÄRTS" if steigung < 0 else "NEUTRAL"
+        return {"richtung": richtung, "grund": "lineare_regression_fallback", "formation": None, "steigung": steigung}
+    richtung, grund = _richtung_aus_kanal(kanal)
+    return {"richtung": richtung, "grund": grund, "formation": kanal.get("formation"), "daten": kanal}
+
+
+def _uebergeordnete_richtung(intraday, daily):
+    """Erzeugt die gewünschte 6M-/Tages-/Intraday-Richtungsdiagnose.
+
+    6M wird aus den letzten sechs Monaten der vorhandenen Tagesdaten abgeleitet,
+    Tageschart aus der vorhandenen Tagesreihe und Intraday aus der bestehenden
+    Intraday-Reihe. Es werden keine neuen Kursmarken erfunden und kein Score gebildet.
+    """
+    sechs_monate_start = daily.index[-1] - mod.pd.Timedelta(days=183)
+    sechs_monate = daily.loc[daily.index >= sechs_monate_start]
+    sechs = _kanal_richtung(sechs_monate, mod.LANGFRIST_KANAL_FENSTER, mod.LANGFRIST_KANAL_MIN_PUNKTE)
+    tages = _kanal_richtung(daily, mod.TAGESCHART_KANAL_FENSTER, mod.TAGESCHART_KANAL_MIN_PUNKTE)
+    intra = _kanal_richtung(intraday, mod.INTRADAY_KANAL_FENSTER, mod.INTRADAY_KANAL_MIN_PUNKTE)
+
+    grosse_abwaerts = sechs["richtung"] == "ABWÄRTS" and tages["richtung"] == "ABWÄRTS"
+    long_warnung = grosse_abwaerts
+    if grosse_abwaerts:
+        grund = "Long läuft gegen die übergeordnete Struktur."
+        long_setup = "Gegenbewegung / Counter-Trend"
+    elif sechs["richtung"] == "ABWÄRTS" or tages["richtung"] == "ABWÄRTS":
+        grund = "Übergeordnete Struktur teilweise abwärtsgerichtet; Long ist gegen mindestens eine höhere Zeitebene."
+        long_setup = "vorsichtige Gegenbewegung / Counter-Trend"
+    else:
+        grund = "Keine eindeutige übergeordnete Abwärtsstruktur in 6M und Tageschart."
+        long_setup = "Trend-Setup / normale Chartprüfung"
+
+    return {
+        "6M": sechs,
+        "Tageschart": tages,
+        "Intraday": intra,
+        "long_warnung": long_warnung,
+        "grund": grund,
+        "long_setup": long_setup,
+        "regel": "Long-Warnung bei gleichzeitig ABWÄRTS in 6M und Tageschart; kein Score und kein automatisches Long-Verbot.",
+    }
+
+
 def _bounce_confirmation(reihe, support_price, lookback=5):
     """Prueft einen abgeschlossenen Support-Bounce ohne Look-ahead."""
     if reihe is None or len(reihe) < 3:
@@ -472,7 +544,9 @@ def main():
     # Die neue Strukturkette ist ab hier die EINZIGE Entscheidungsquelle.
     # bestimme_chart_setup() liefert nur noch die Roh-/Basisstrukturen; dessen
     # bereits berechnete Entry/Stop/TP-Werte werden bewusst NICHT verwendet.
+    struktur_richtung = _uebergeordnete_richtung(intraday, daily)
     structure_chain = _build_structure_chain(setup, intraday, daily, kurs)
+    structure_chain["uebergeordnete_richtung"] = struktur_richtung
 
     kanal_gesamt = mod.diagnostiziere_kanalvarianten(
         intraday, mod.INTRADAY_KANAL_FENSTER, mod.INTRADAY_KANAL_MIN_PUNKTE
@@ -498,6 +572,14 @@ def main():
             })
 
     print("\n=== FINALES CHART-SETUP (NEUE STRUKTURKETTE) ===")
+    richtung = struktur_richtung
+    print("\nÜBERGEORDNETE RICHTUNG")
+    print(f"6M:         {richtung["6M"]["richtung"]}")
+    print(f"Tageschart: {richtung["Tageschart"]["richtung"]}")
+    print(f"Intraday:   {richtung["Intraday"]["richtung"]}")
+    print(f"LONG-WARNUNG: {"⚠️ JA" if richtung["long_warnung"] else "NEIN"}")
+    print(f"Grund: {richtung["grund"]}")
+    print(f"LONG-SETUP: {richtung["long_setup"]}")
     print(json.dumps(_safe(structure_chain), ensure_ascii=False, indent=2, default=str))
     print("\n=== BASIS-CHARTANALYSE (NUR DIAGNOSTIK, NICHT ENTSCHEIDUNGSRELEVANT) ===")
     print(json.dumps(_safe(setup), ensure_ascii=False, indent=2, default=str))
