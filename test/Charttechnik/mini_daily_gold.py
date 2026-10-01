@@ -1770,13 +1770,25 @@ def _chartkandidaten_fuer_setup(entry_zeit, intraday_reihe=None, daily_reihe=Non
         )
         out = []
         for preis, treffer in roh.get("widerstandszonen", []):
-            out.append({"preis": float(preis), "typ": "widerstandszone", "seite": "widerstand",
-                        "ebene": ebene, "quelle": f"{ebene}-Widerstandszone ({int(treffer)}x)",
-                        "treffer": int(treffer)})
+            basis = {"preis": float(preis), "typ": "widerstandszone", "seite": "widerstand",
+                     "ebene": ebene, "quelle": f"{ebene}-Widerstandszone ({int(treffer)}x)",
+                     "treffer": int(treffer)}
+            out.append(basis)
+            rollenwechsel = _bestaetigter_widerstand_zu_support(teil, preis)
+            if rollenwechsel:
+                out.append({**basis, "seite": "support",
+                            "quelle": f"{ebene}-Widerstand→Support ({int(treffer)}x)",
+                            "rollenwechsel": rollenwechsel})
         for preis, treffer in roh.get("supportzonen", []):
-            out.append({"preis": float(preis), "typ": "widerstandszone", "seite": "support",
-                        "ebene": ebene, "quelle": f"{ebene}-Supportzone ({int(treffer)}x)",
-                        "treffer": int(treffer)})
+            basis = {"preis": float(preis), "typ": "widerstandszone", "seite": "support",
+                     "ebene": ebene, "quelle": f"{ebene}-Supportzone ({int(treffer)}x)",
+                     "treffer": int(treffer)}
+            out.append(basis)
+            rollenwechsel = _bestaetigter_support_zu_widerstand(teil, preis)
+            if rollenwechsel:
+                out.append({**basis, "seite": "widerstand",
+                            "quelle": f"{ebene}-Support→Widerstand ({int(treffer)}x)",
+                            "rollenwechsel": rollenwechsel})
         return out
 
     kandidaten = []
@@ -1812,6 +1824,151 @@ def _struktur_prio(k):
 def _ebene_prio(k):
     return {"6M": 3, "Tageschart": 2, "Intraday": 1}.get(k.get("ebene"), 0)
 
+
+
+def _bestaetigter_support_zu_widerstand(teil, preis, toleranz=0.003, bestaetigungs_bars=2):
+    """Diagnostischer Rollenwechsel Support -> Widerstand.
+
+    Ein urspruenglicher Support wird nicht allein deshalb zum Widerstand, weil
+    der aktuelle Kurs darunter liegt. Erforderlich sind:
+      1. eine fruehere Beruehrung/Unterschreitung als Support,
+      2. danach mindestens `bestaetigungs_bars` Schlusskurse unter der Zone,
+      3. anschliessend ein Ruecklauf in die Zone von unten.
+    Ruecklauf allein ohne vorherigen bestaetigten Bruch reicht nicht.
+    """
+    if teil is None or len(teil) < 8:
+        return None
+    preis = float(preis)
+    tol = abs(preis) * toleranz
+    close = teil["Close"].astype(float)
+    high = teil["High"].astype(float)
+    low = teil["Low"].astype(float)
+
+    untere_zone = preis - tol
+    obere_zone = preis + tol
+    # historische Supportberuehrung: Tief/Schluss in der Zone oder darunter,
+    # bevor der spaetere Bruch erfolgt.
+    support_indices = []
+    for i in range(len(teil)):
+        if low.iloc[i] <= obere_zone and close.iloc[i] >= untere_zone:
+            support_indices.append(i)
+    if not support_indices:
+        return None
+
+    for support_i in reversed(support_indices):
+        start = support_i + 1
+        if start + bestaetigungs_bars > len(teil):
+            continue
+        for break_i in range(start, len(teil) - bestaetigungs_bars + 1):
+            folge = close.iloc[break_i:break_i + bestaetigungs_bars]
+            if len(folge) < bestaetigungs_bars or not bool((folge < untere_zone).all()):
+                continue
+            # Ruecklauf nach bestaetigtem Bruch: High beruehrt Zone, Close bleibt darunter.
+            for retest_i in range(break_i + bestaetigungs_bars, len(teil)):
+                if high.iloc[retest_i] >= untere_zone and close.iloc[retest_i] < obere_zone:
+                    return {
+                        "rollenwechsel": True,
+                        "urspruengliche_seite": "support",
+                        "neue_seite": "widerstand",
+                        "preis": preis,
+                        "support_zeit": teil.index[support_i],
+                        "bruch_zeit": teil.index[break_i],
+                        "retest_zeit": teil.index[retest_i],
+                        "bestaetigungs_bars": bestaetigungs_bars,
+                    }
+    return None
+
+
+def _bestaetigter_widerstand_zu_support(teil, preis, toleranz=0.003, bestaetigungs_bars=2):
+    """Diagnostischer Rollenwechsel Widerstand -> Support, spiegelbildlich zur
+    Support->Widerstand-Pruefung: historischer Widerstand, bestaetigter Schluss-
+    kursausbruch darueber, danach Ruecklauf in die Zone von oben mit Schlusskurs
+    darueber.
+    """
+    if teil is None or len(teil) < 8:
+        return None
+    preis = float(preis)
+    tol = abs(preis) * toleranz
+    untere_zone = preis - tol
+    obere_zone = preis + tol
+    close = teil["Close"].astype(float)
+    high = teil["High"].astype(float)
+    low = teil["Low"].astype(float)
+
+    resistance_indices = []
+    for i in range(len(teil)):
+        if high.iloc[i] >= untere_zone and close.iloc[i] <= obere_zone:
+            resistance_indices.append(i)
+    if not resistance_indices:
+        return None
+
+    for resistance_i in reversed(resistance_indices):
+        start = resistance_i + 1
+        for break_i in range(start, len(teil) - bestaetigungs_bars + 1):
+            folge = close.iloc[break_i:break_i + bestaetigungs_bars]
+            if len(folge) < bestaetigungs_bars or not bool((folge > obere_zone).all()):
+                continue
+            for retest_i in range(break_i + bestaetigungs_bars, len(teil)):
+                if low.iloc[retest_i] <= obere_zone and close.iloc[retest_i] > untere_zone:
+                    return {
+                        "rollenwechsel": True,
+                        "urspruengliche_seite": "widerstand",
+                        "neue_seite": "support",
+                        "preis": preis,
+                        "widerstand_zeit": teil.index[resistance_i],
+                        "bruch_zeit": teil.index[break_i],
+                        "retest_zeit": teil.index[retest_i],
+                        "bestaetigungs_bars": bestaetigungs_bars,
+                    }
+    return None
+
+def diagnostiziere_kanalvarianten(reihe, fenster, min_punkte):
+    """Vergleicht die bestehende Close-Kanalberechnung mit High/Low-Varianten.
+
+    Die Produktions-/Testlogik wird dabei nicht stillschweigend umgestellt.
+    Die Varianten dienen ausschliesslich dazu, die Differenz zwischen der im
+    bestehenden Code berechneten Kanalgrenze und der sichtbaren Chartgrenze
+    nachvollziehbar zu machen.
+    """
+    out = {"bestehend_close": None, "high_low": None, "swing_punkte": {}}
+    if reihe is None or len(reihe) < max(20, fenster * 2 + 3):
+        return out
+
+    info = finde_trendkanal(reihe, fenster=fenster, min_punkte=min_punkte)
+    if info is not None:
+        x = mdates.date2num(reihe.index[-1])
+        out["bestehend_close"] = {
+            "formation": info.get("formation"),
+            "obere_grenze": float(info["obere_linie"][0] * x + info["obere_linie"][1]),
+            "untere_grenze": float(info["untere_linie"][0] * x + info["untere_linie"][1]),
+            "quelle": "finde_trendkanal(Close)",
+        }
+
+    # Diagnose: dieselbe Methode auf High/Low statt Close.
+    hochs, _ = finde_swing_punkte(reihe["High"], fenster)
+    _, tiefs = finde_swing_punkte(reihe["Low"], fenster)
+    if len(hochs) >= min_punkte and len(tiefs) >= min_punkte:
+        xh = mdates.date2num([t for t, _ in hochs]); yh = np.array([v for _, v in hochs])
+        xl = mdates.date2num([t for t, _ in tiefs]); yl = np.array([v for _, v in tiefs])
+        wh = np.linspace(1, 3, len(xh)) if len(xh) > 2 else None
+        wl = np.linspace(1, 3, len(xl)) if len(xl) > 2 else None
+        sh, ah = np.polyfit(xh, yh, 1, w=wh)
+        sl, al = np.polyfit(xl, yl, 1, w=wl)
+        ah += float(np.max(yh - (sh * xh + ah)))
+        al += float(np.min(yl - (sl * xl + al)))
+        x = mdates.date2num(reihe.index[-1])
+        out["high_low"] = {
+            "obere_grenze": float(sh * x + ah),
+            "untere_grenze": float(sl * x + al),
+            "quelle": "gleiche Kanalhullkurve auf High/Low",
+        }
+    out["swing_punkte"] = {
+        "close_highs": [(str(t), float(v)) for t, v in finde_swing_punkte(reihe["Close"], fenster)[0]],
+        "close_lows": [(str(t), float(v)) for t, v in finde_swing_punkte(reihe["Close"], fenster)[1]],
+        "high_highs": [(str(t), float(v)) for t, v in hochs],
+        "low_lows": [(str(t), float(v)) for t, v in tiefs],
+    }
+    return out
 
 def bestimme_chart_setup(entry_zeit, intraday_reihe=None, daily_reihe=None, aktueller_kurs=None):
     """Charttechnik -> Setup -> Entry/Stop/TP1/TP2 -> CRV.

@@ -43,6 +43,40 @@ def main():
     print("\n=== CHART-SETUP ===")
     print(json.dumps(_safe(setup), ensure_ascii=False, indent=2, default=str))
 
+    # Zusatzdiagnose 1: Rollenwechsel Support <-> Widerstand. Diese Auswertung
+    # zeigt explizit, welche historische Zone nach bestaetigtem Bruch und Retest
+    # ihre aktuelle Rolle gewechselt hat. Das ist fuer TP, Entry und Stop relevant.
+    rollenwechsel = []
+    for k in setup.get("kandidaten", []):
+        rw = k.get("rollenwechsel")
+        if rw:
+            rollenwechsel.append({
+                "preis": k.get("preis"),
+                "ebene": k.get("ebene"),
+                "typ": k.get("typ"),
+                "urspruengliche_seite": rw.get("urspruengliche_seite"),
+                "neue_seite": rw.get("neue_seite"),
+                "quelle": k.get("quelle"),
+                "support_oder_widerstand_zeit": rw.get("support_zeit", rw.get("widerstand_zeit")),
+                "bruch_zeit": rw.get("bruch_zeit"),
+                "retest_zeit": rw.get("retest_zeit"),
+            })
+    print("\n=== SUPPORT/WIDERSTAND-ROLLENWECHSEL ===")
+    print(json.dumps(_safe(rollenwechsel), ensure_ascii=False, indent=2, default=str))
+
+    # Zusatzdiagnose 2: Kanalberechnung. Der bestehende Kanal bleibt unveraendert
+    # Close-basiert; zusaetzlich wird dieselbe Huellkurvenmethode auf High/Low
+    # gerechnet, damit die Abweichung zu einer optisch erwarteten Chartgrenze
+    # (z.B. ca. 4232) exakt nachvollziehbar wird.
+    kanal_diag = {
+        "Intraday": mod.diagnostiziere_kanalvarianten(intraday, mod.INTRADAY_KANAL_FENSTER, mod.INTRADAY_KANAL_MIN_PUNKTE),
+        "Tageschart": mod.diagnostiziere_kanalvarianten(daily, mod.TAGESCHART_KANAL_FENSTER, mod.TAGESCHART_KANAL_MIN_PUNKTE),
+    }
+    sechs_m = daily.loc[daily.index >= (daily.index[-1] - mod.pd.DateOffset(months=mod.LANGFRIST_MONATE))]
+    kanal_diag["6M"] = mod.diagnostiziere_kanalvarianten(sechs_m, mod.LANGFRIST_KANAL_FENSTER, mod.LANGFRIST_KANAL_MIN_PUNKTE)
+    print("\n=== KANAL-DIAGNOSE CLOSE vs HIGH/LOW ===")
+    print(json.dumps(_safe(kanal_diag), ensure_ascii=False, indent=2, default=str))
+
     # Die beiden bestehenden Signalerzeuger werden nur diagnostisch ausgefuehrt.
     # Es werden keine Alerts geschrieben/versendet und keine Produktionsdateien veraendert.
     position = mod.berechne_positionstrading_status(intraday_reihe=intraday)
@@ -58,6 +92,8 @@ def main():
         "intraday_end": str(intraday.index[-1]),
         "daily_end": str(daily.index[-1]),
         "chart_setup": _safe(setup),
+        "rollenwechsel_diagnose": _safe(rollenwechsel),
+        "kanal_diagnose": _safe(kanal_diag),
         "positionstrading": _safe(position),
         "range_ausbruch": _safe(range_status),
     }
