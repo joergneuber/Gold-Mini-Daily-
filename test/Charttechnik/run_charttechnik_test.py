@@ -367,6 +367,9 @@ def main():
     print(f"Intraday: {intraday.index[-1]} | Bars: {len(intraday)}")
     print(f"Daily:    {daily.index[-1]} | Bars: {len(daily)}")
 
+    # Die neue Strukturkette ist ab hier die EINZIGE Entscheidungsquelle.
+    # bestimme_chart_setup() liefert nur noch die Roh-/Basisstrukturen; dessen
+    # bereits berechnete Entry/Stop/TP-Werte werden bewusst NICHT verwendet.
     structure_chain = _build_structure_chain(setup, intraday, daily, kurs)
 
     kanal_gesamt = mod.diagnostiziere_kanalvarianten(
@@ -392,8 +395,10 @@ def main():
                 "bestaetigungs_bars": rw.get("bestaetigungs_bars"),
             })
 
-    print("\n=== VOLLSTAENDIGE STRUKTURKETTE ===")
+    print("\n=== FINALES CHART-SETUP (NEUE STRUKTURKETTE) ===")
     print(json.dumps(_safe(structure_chain), ensure_ascii=False, indent=2, default=str))
+    print("\n=== BASIS-CHARTANALYSE (NUR DIAGNOSTIK, NICHT ENTSCHEIDUNGSRELEVANT) ===")
+    print(json.dumps(_safe(setup), ensure_ascii=False, indent=2, default=str))
     print("\n=== AKTUELLER WENDEPUNKT-KANAL ===")
     print(json.dumps(_safe(kanal_aktuell), ensure_ascii=False, indent=2, default=str))
     print("\n=== KANALVERLAUF: LETZTE ENTWICKLUNG ===")
@@ -407,7 +412,11 @@ def main():
         "realtime": kurs,
         "intraday_end": str(intraday.index[-1]),
         "daily_end": str(daily.index[-1]),
-        "chart_setup": _safe(setup),
+        # EINZIGE Entscheidungsquelle fuer das Test-Setup.
+        "chart_setup": _safe(structure_chain),
+        # Alte Funktion nur als Roh-/Diagnosequelle; ihre Auswahlwerte werden
+        # nicht als Entry/Stop/TP uebernommen.
+        "basis_chartanalyse_diagnose": _safe(setup),
         "strukturkette": _safe(structure_chain),
         "aktiver_wendepunkt_kanal": _safe(kanal_aktuell),
         "kanal_verlauf": _safe(kanal_verlauf),
