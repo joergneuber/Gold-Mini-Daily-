@@ -15,6 +15,7 @@ Wichtig:
 import importlib.util
 import json
 import os
+import pandas as pd
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -227,103 +228,151 @@ def _tp_kandidaten_diagnose(kandidaten, entry, stop, tp1_crv=1.0):
                 row["auswahlbegruendung"] = "charttechnisch_gueltig; CRV > 1, aber TP1 bereits durch naehere gueltige Struktur bestimmt"
     return rows
 
-def _rollenwechsel_aktuell_gueltig(kandidat, aktueller_kurs, rollen_events=None):
-    """Bestimmt die aktuell belegte Chartrolle eines Preislevels.
+def _rollenwechsel_bestaetigung(rw):
+    """Prueft, ob ein Rollenwechsel charttechnisch ausreichend bestaetigt ist.
 
-    WICHTIG: Die Lage des aktuellen Kurses relativ zum Level erzeugt NICHT
-    automatisch einen Rollenwechsel. Ein bestaetigter Rollenwechsel ist nur
-    durch die chronologisch letzte, explizit diagnostizierte R->S- oder S->R-
-    Sequenz gegeben. Ein R->S-Level bleibt daher Support, auch wenn der Kurs
-    spaeter darunter liegt, solange kein bestaetigter S->R-Wechsel vorliegt.
+    Ein kurzer Bruch allein reicht nicht. Fuer einen bestaetigten Wechsel werden
+    Bruch, Retest und mindestens die im Datensatz hinterlegte Schluss-/Bestatigung
+    (bestaetigungs_bars) verlangt. Fehlt die Retest-/Bestatigungsinformation,
+    bleibt der Wechsel unbestaetigt und darf die aktuelle Rolle nicht umschalten.
     """
-    events = list(rollen_events or [])
-    if not events:
-        rw = kandidat.get("rollenwechsel") or {}
-        if rw.get("neue_seite"):
-            events = [rw]
+    if not rw or not rw.get("rollenwechsel"):
+        return {
+            "bestaetigt": False,
+            "bruch_erkannt": False,
+            "fakeout_vermutet": False,
+            "retetst_erkannt": False,
+            "retetst_bestaetigt": False,
+            "grund": "kein_rollenwechselereignis",
+        }
+    bruch = rw.get("bruch_zeit")
+    retest = rw.get("retest_zeit")
+    bars = rw.get("bestaetigungs_bars")
+    try:
+        bars_ok = int(bars) >= 2
+    except (TypeError, ValueError):
+        bars_ok = False
+    bruch_ok = bool(bruch)
+    retest_ok = bool(retest)
+    bestaetigt = bruch_ok and retest_ok and bars_ok
+    fakeout = bruch_ok and not bestaetigt
+    if bestaetigt:
+        grund = "Bruch + Retest + mindestens 2 Bestaetigungsbars vorhanden"
+    elif fakeout:
+        grund = "Bruch vorhanden, aber Retest/Bestaetigung fehlt; Rollenwechsel nicht bestaetigt"
+    else:
+        grund = "Rollenwechsel nicht vollstaendig bestaetigt"
+    return {
+        "bestaetigt": bestaetigt,
+        "bruch_erkannt": bruch_ok,
+        "fakeout_vermutet": fakeout,
+        "retetst_erkannt": retest_ok,
+        "retetst_bestaetigt": bool(retest_ok and bars_ok),
+        "bruch_zeit": bruch,
+        "retest_zeit": retest,
+        "bestaetigungs_bars": bars,
+        "grund": grund,
+    }
 
-    if not events:
-        return kandidat.get("seite"), True, "keine_bestaetigte_rollenwechsel-sequenz; urspruengliche_seite_gilt"
 
-    def event_time(ev):
-        value = ev.get("retest_zeit") or ev.get("bruch_zeit") or ev.get("support_zeit") or ev.get("widerstand_zeit")
+def _rollenwechsel_aktuell_gueltig(kandidat, aktueller_kurs, gruppen_events=None):
+    """Bestimmt die aktuelle Rolle chronologisch aus bestaetigten Ereignissen.
+
+    Der aktuelle Kurs allein darf KEINEN Rollenwechsel erzeugen oder aufheben.
+    Ein bestaetigtes R->S bleibt Support, auch wenn der Kurs spaeter unter dem
+    Level notiert. Erst ein spaeteres, separat bestaetigtes S->R darf die Rolle
+    wieder umkehren. Spiegelbildlich gilt dasselbe fuer S->R -> R->S.
+    """
+    rw = kandidat.get("rollenwechsel") or {}
+    events = list(gruppen_events or [])
+    if rw and rw.get("rollenwechsel"):
+        events.append(rw)
+
+    bestaetigte = []
+    diag_events = []
+    for event in events:
+        check = _rollenwechsel_bestaetigung(event)
+        item = dict(check)
+        item.update({
+            "urspruengliche_seite": event.get("urspruengliche_seite"),
+            "neue_seite": event.get("neue_seite"),
+            "preis": event.get("preis", kandidat.get("preis")),
+        })
+        diag_events.append(item)
+        if check["bestaetigt"] and event.get("neue_seite") in {"support", "widerstand"}:
+            bestaetigte.append(event)
+
+    if not bestaetigte:
+        return kandidat.get("seite"), True, "keine_bestaetigte_rollenwechselhistorie; urspruengliche_chartrolle_bleibt", {
+            "ereignisse": diag_events,
+            "aktuelle_rolle": kandidat.get("seite"),
+        }
+
+    def event_time(event):
+        value = event.get("retest_zeit") or event.get("bruch_zeit")
+        if value is None:
+            return pd.Timestamp.min
         try:
             return pd.Timestamp(value)
         except Exception:
             return pd.Timestamp.min
 
-    latest = max(events, key=event_time)
-    neue_seite = latest.get("neue_seite")
-    if neue_seite not in {"support", "widerstand"}:
-        return kandidat.get("seite"), True, "unbekannte_rollenwechselrolle; keine_automatische_umdeutung"
-
-    kurs = float(aktueller_kurs)
-    preis = float(kandidat["preis"])
-    if neue_seite == "support":
-        if kurs < preis:
-            grund = "letzter_bestaetigter_R->S; kurs_unter_level_aber_keine_bestaetigte_S->R_umdeutung"
-        else:
-            grund = "letzter_bestaetigter_R->S; aktuelle_rolle_support"
-    else:
-        if kurs > preis:
-            grund = "letzter_bestaetigter_S->R; kurs_ueber_level_aber_keine_bestaetigte_R->S_umdeutung"
-        else:
-            grund = "letzter_bestaetigter_S->R; aktuelle_rolle_widerstand"
-    return neue_seite, True, grund
+    latest = max(bestaetigte, key=event_time)
+    aktuelle_seite = latest.get("neue_seite")
+    latest_check = _rollenwechsel_bestaetigung(latest)
+    return aktuelle_seite, True, (
+        f"letzter_bestaetigter_rollenwechsel={latest.get('urspruengliche_seite')}"
+        f"->{aktuelle_seite}; aktuelle_kurslage_aendert_die_rolle_nicht"
+    ), {
+        "ereignisse": diag_events,
+        "aktuelle_rolle": aktuelle_seite,
+        "letztes_bestaetigtes_ereignis": latest,
+        "bestaetigung": latest_check,
+    }
 
 
 def _aktive_kandidaten(kandidaten, aktueller_kurs):
-    """Fasst gleiche Preis-/Zeitebenen zusammen und bestimmt die aktuelle Rolle.
-
-    Die aktuelle Rolle folgt ausschliesslich der chronologisch letzten
-    bestaetigten Rollenwechsel-Sequenz. Die blosse Lage des Kurses ueber/unter
-    einem Level reicht NICHT fuer eine Umdeutung. So bleibt z.B. ein bestaetigtes
-    R->S-Level Support, auch wenn der Kurs spaeter darunter notiert, solange kein
-    bestaetigter S->R-Wechsel vorliegt.
-    """
+    """Fasst gleiche Preis-/Ebenen-Strukturen zusammen und bestimmt ihre Rolle chronologisch."""
     gruppen = {}
     for k in kandidaten:
-        key = (round(float(k["preis"]), 4), str(k.get("ebene") or ""), str(k.get("typ") or ""))
+        key = (round(float(k["preis"]), 4), str(k.get("typ", "")), str(k.get("ebene", "")))
         gruppen.setdefault(key, []).append(k)
 
     out = []
     diagnostik = []
     for key, gruppe in gruppen.items():
-        basis = dict(gruppe[0])
-        events = []
-        for g in gruppe:
-            rw = g.get("rollenwechsel") or {}
-            if rw.get("neue_seite"):
-                events.append(rw)
-
-        aktuelle_seite, gueltig, grund = _rollenwechsel_aktuell_gueltig(
-            basis, aktueller_kurs, events
+        rollen_events = [k.get("rollenwechsel") for k in gruppe if k.get("rollenwechsel")]
+        # Die unveränderte Basisrolle kommt aus der Gruppe. Ein bestätigter Rollenwechsel
+        # darf sie nur chronologisch überschreiben; der aktuelle Kurs ist kein Kriterium.
+        basis = next((k for k in gruppe if not k.get("rollenwechsel")), gruppe[0])
+        aktuelle_seite, gueltig, grund, rollen_info = _rollenwechsel_aktuell_gueltig(
+            basis, aktueller_kurs, rollen_events
         )
-        basis["aktuelle_rolle_gueltig"] = gueltig
-        basis["aktuelle_seite"] = aktuelle_seite
-        basis["rollenwechsel_pruefung"] = grund
-        basis["rollenwechsel_events"] = events
-        # Die aktuell belegte Rolle ersetzt die historische Rohseite nur dann,
-        # wenn sie durch eine echte Rollenwechsel-Sequenz belegt ist.
-        basis["seite"] = aktuelle_seite
+
+        for original in gruppe:
+            v = dict(original)
+            v["urspruengliche_seite"] = original.get("seite")
+            v["aktuelle_seite"] = aktuelle_seite
+            v["aktuelle_rolle_gueltig"] = gueltig
+            v["rollenwechsel_pruefung"] = grund
+            v["rollenwechsel_bestaetigung"] = rollen_info
+            # Eine aktuell bestaetigte Rolle ist die einzige Seite, die fuer Entry/Stop/TP
+            # verwendet werden darf. Die Rohobjekte bleiben separat diagnostisch sichtbar.
+            v["seite"] = aktuelle_seite
+            out.append(v)
 
         diagnostik.append({
             "preis": float(basis["preis"]),
             "typ": basis.get("typ"),
             "ebene": basis.get("ebene"),
-            "historische_seiten": sorted(set(str(g.get("seite")) for g in gruppe)),
+            "urspruengliche_seiten": sorted(set(str(k.get("seite")) for k in gruppe)),
             "aktuelle_seite": aktuelle_seite,
             "aktuelle_rolle_gueltig": gueltig,
-            "rollenwechsel_events": events,
             "pruefung": grund,
+            "rollenwechsel_bestaetigung": rollen_info,
         })
-
-        # Auch Levels mit Support-Rolle bleiben erhalten; sie duerfen nur dort
-        # verwendet werden, wo Support gebraucht wird. Ein historischer
-        # Widerstand wird nicht parallel als TP-Kandidat weitergereicht.
-        out.append(basis)
-
     return out, diagnostik
+
 
 def _aktive_wendepunkt_kandidaten(reihe):
     """Erzeugt aus dem *aktuellen* Wendepunkt-Kanal zwei testweise Chartkandidaten."""
@@ -639,7 +688,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
             for k in _chart_hierarchie(kandidaten, hypothetischer_entry)
         ],
-        "regel": "Charttechnischer Grund ist zwingend. Aktuelle Chartrolle und Preisnaehe bestimmen die Kandidaten; erst danach wird CRV berechnet. CRV > 1 ist nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP2 ist die unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur deren Zulassungsfilter. Ein Rollenwechsel Widerstand->Support ist fuer einen Long-TP kein Widerstand mehr.",
+        "regel": "Charttechnischer Grund ist zwingend. Aktuelle Chartrolle und Preisnaehe bestimmen die Kandidaten; erst danach wird CRV berechnet. CRV > 1 ist nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP2 ist die unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur deren Zulassungsfilter. Die aktuelle Rolle bestimmt die Funktion. R->S bleibt Support, bis ein spaeterer bestaetigter S->R-Wechsel vorliegt; S->R bleibt Widerstand, bis ein spaeterer bestaetigter R->S-Wechsel vorliegt.",
     }
 
     richtung = _uebergeordnete_richtung(intraday, daily)
@@ -668,12 +717,12 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "tp2": tp2,
             "tp2_pruefung": tp2_pruefung,
             "alle_tp_kandidaten": tp_candidates,
-            "regel": "Jeder Entry/Stop/TP benoetigt zuerst einen charttechnischen Grund und eine aktuell gueltige Chartrolle. Widerstaende werden nach Preisnaehe geprueft; erst danach CRV. CRV > 1 ist nur Zulassung fuer TP1. TP2 = unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur Zulassungsfilter. Kein Score, kein 2R/3R-Fallback, kein Ueberspringen. Widerstand->Support darf nicht als Long-TP verwendet werden.",
+            "regel": "Jeder Entry/Stop/TP benoetigt zuerst einen charttechnischen Grund und eine aktuell gueltige Chartrolle. Widerstaende werden nach Preisnaehe geprueft; erst danach CRV. CRV > 1 ist nur Zulassung fuer TP1. TP2 = unmittelbar naechste hoehere gueltige Chartstruktur; CRV >= 2 ist nur Zulassungsfilter. Kein Score, kein 2R/3R-Fallback, kein Ueberspringen. Die aktuelle bestaetigte Rolle ist massgeblich; ein historischer R->S-Wechsel bleibt Support, bis ein spaeterer bestaetigter S->R-Wechsel vorliegt.",
         },
         "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
             "kandidaten": rollen_diag,
-            "regel": "Historischer Rollenwechsel wird nur verwendet, solange die neue Rolle durch den aktuellen Schlusskurs nicht wieder gebrochen wurde.",
+            "regel": "Aktuelle Rolle wird ausschliesslich aus der Chronologie bestaetigter Rollenwechsel bestimmt; der aktuelle Kurs allein hebt die Rolle nicht auf.",
         },
         "aktiver_kanal": kanal_diag,
         "uebergeordnete_richtung": richtung,
