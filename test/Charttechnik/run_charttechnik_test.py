@@ -308,6 +308,63 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     else:
         tp2_candidates = []
 
+    # HYPOTHETISCHE TP-KETTE: reine Diagnose, niemals Trade-Auswahl.
+    # Sie verwendet den aktuellen Kurs nur als hypothetischen Entry, damit TP1/TP2
+    # auch dann vollständig geprüft werden können, wenn aktuell kein bestätigter Entry
+    # vorliegt. Es wird dadurch KEIN Trade erzeugt.
+    hypothetischer_entry = float(kurs)
+    hypo_stop_candidates = sorted(
+        [k for k in kandidaten if k.get("seite") == "support" and float(k["preis"]) < hypothetischer_entry],
+        key=lambda k: float(k["preis"]), reverse=True,
+    )
+    hypothetischer_stop_basis = hypo_stop_candidates[0] if hypo_stop_candidates else None
+    hypothetischer_stop = float(hypothetischer_stop_basis["preis"]) if hypothetischer_stop_basis else None
+    hypothetisches_risiko = (
+        hypothetischer_entry - hypothetischer_stop
+        if hypothetischer_stop is not None and hypothetischer_stop < hypothetischer_entry
+        else None
+    )
+
+    hypothetische_tp_kandidaten = []
+    if hypothetisches_risiko and hypothetisches_risiko > 0:
+        for r in sorted(
+            [k for k in kandidaten if k.get("seite") == "widerstand" and float(k["preis"]) > hypothetischer_entry],
+            key=lambda k: float(k["preis"]),
+        ):
+            preis = float(r["preis"])
+            crv = (preis - hypothetischer_entry) / hypothetisches_risiko
+            row = _kandidat_view(r, hypothetischer_entry, hypothetischer_stop)
+            row["aktuelle_rolle_gueltig"] = True
+            row["crv"] = crv
+            row["verworfen"] = crv <= 1.0
+            row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
+            row["auswahlstufe"] = "TP1-erster-gueltiger" if crv > 1.0 else "vor_TP1_verworfen"
+            hypothetische_tp_kandidaten.append(row)
+
+    hypo_gueltig = [x for x in hypothetische_tp_kandidaten if not x["verworfen"]]
+    hypo_tp1 = hypo_gueltig[0] if hypo_gueltig else None
+    hypo_tp2 = None
+    if hypo_tp1 is not None:
+        hypo_tp2_candidates = [
+            x for x in hypo_gueltig
+            if x["preis"] > hypo_tp1["preis"] + 1e-6 and x["crv"] >= 2.0
+        ]
+        hypo_tp2 = hypo_tp2_candidates[0] if hypo_tp2_candidates else None
+
+    hypothetische_tp_kette = {
+        "diagnostisch_nur": True,
+        "trade_ausloesen": False,
+        "hypothetischer_entry": hypothetischer_entry,
+        "entry_grundlage": "aktueller Kurs nur als Diagnosewert; kein bestaetigter Entry",
+        "hypothetischer_stop": hypothetischer_stop,
+        "hypothetischer_stop_basis": hypothetischer_stop_basis,
+        "hypothetisches_risiko": hypothetisches_risiko,
+        "tp1": hypo_tp1,
+        "tp2": hypo_tp2,
+        "alle_tp_kandidaten": hypothetische_tp_kandidaten,
+        "regel": "Nur Diagnose der Widerstandskette. Kein Trade ohne bestaetigten charttechnischen Entry. CRV > 1 ist Zulassung, kein Score; TP2 naechste hoehere Huerde mit CRV >= 2.",
+    }
+
     return {
         "kurs": kurs,
         "entry": {
@@ -330,6 +387,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "alle_tp_kandidaten": tp_candidates,
             "regel": "Naechste charttechnische Widerstandshuerde oberhalb Entry; CRV > 1 ist nur Zulassung. TP2 = naechste hoehere Huerde mit CRV >= 2. Kein Score, kein 2R/3R-Fallback.",
         },
+        "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
             "kandidaten": rollen_diag,
             "regel": "Historischer Rollenwechsel wird nur verwendet, solange die neue Rolle durch den aktuellen Schlusskurs nicht wieder gebrochen wurde.",
