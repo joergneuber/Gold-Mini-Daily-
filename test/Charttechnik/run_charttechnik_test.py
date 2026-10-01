@@ -369,7 +369,32 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             })
 
     stop_basis = stop_candidates[0] if stop_candidates else None
-    stop = float(stop_basis["preis"]) if stop_basis else None
+    stop = None
+    stop_detail = None
+    if stop_basis:
+        lower = stop_basis.get("untere_grenze")
+        if lower is not None and float(lower) < float(stop_basis["preis"]):
+            # Explizite Support-Unterkante ist charttechnisch belastbarer als
+            # der Mittelpunkt/Referenzwert der Zone. Der Stop liegt minimal
+            # darunter; 0.01 ist nur der kleinste verwendete Preisabstand,
+            # kein ATR-/CRV-/Score-Puffer.
+            stop = float(lower) - 0.01
+            stop_detail = {
+                "methode": "explizite_support_unterkante_plus_minimaler_tick",
+                "support_referenz": float(stop_basis["preis"]),
+                "unterkante": float(lower),
+                "stop": stop,
+            }
+        else:
+            # Keine erfundene Unterkante: der Kandidat bleibt diagnostische
+            # Referenz; die uebernaechste Supportstruktur wird separat geprueft.
+            stop = float(stop_basis["preis"])
+            stop_detail = {
+                "methode": "support_referenz_nur_diagnostisch",
+                "support_referenz": stop,
+                "unterkante": None,
+                "stop": stop,
+            }
 
     # Zusaetzliche Diagnose: neben dem naechsten Support wird auch der
     # uebernaechste Support als moegliche strukturelle Stopbasis betrachtet.
@@ -417,9 +442,13 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     tp2 = None
     tp2_pruefung = None
     if tp1 is not None:
-        naechster = next(
+        # TP2 ist preislich zwingend die unmittelbar naechste hoehere
+        # Chartstruktur nach TP1. Die Rangklasse von TP1 darf keine weiter
+        # entfernte Struktur derselben Klasse ueberspringen.
+        naechster = min(
             (x for x in tp_candidates if x["preis"] > tp1["preis"] + 1e-6),
-            None,
+            key=lambda x: x["preis"],
+            default=None,
         )
         if naechster is None:
             tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
@@ -481,9 +510,12 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     hypo_tp2 = None
     hypo_tp2_pruefung = None
     if hypo_tp1 is not None:
-        hypo_naechster = next(
+        # Auch die hypothetische Diagnose darf keine Struktur ueberspringen:
+        # immer der unmittelbar naechste Preis oberhalb von TP1.
+        hypo_naechster = min(
             (x for x in hypothetische_tp_kandidaten if x["preis"] > hypo_tp1["preis"] + 1e-6),
-            None,
+            key=lambda x: x["preis"],
+            default=None,
         )
         if hypo_naechster is None:
             hypo_tp2_pruefung = {"status": "keine_hoeherliegende_struktur"}
@@ -535,8 +567,9 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "basis": stop_basis,
             "alle_stop_support_kandidaten": stop_candidates,
             "stop_alternativen_naechster_und_uebernaechster_support": stop_alternativen,
+            "stop_detail": stop_detail,
             "risiko": risiko,
-            "regel": "Naechster und uebernaechster Support werden als Stopbasis diagnostiziert. Ein Stop minimal unter dem gewaehlten Support wird nur bei expliziter Unterkante berechnet; kein kuenstlicher ATR-/Dollar-Puffer.",
+            "regel": "Naechster und uebernaechster Support werden geprueft. Wenn eine echte Support-Unterkante geliefert wird, liegt der Stop minimal darunter (0.01); sonst bleibt der Support nur Referenz und der uebernaechste Support wird diagnostisch ausgewertet. Kein ATR-/CRV-/Score-Puffer.",
         },
         "tp": {
             "tp1": tp1,
