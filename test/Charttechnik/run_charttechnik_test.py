@@ -139,11 +139,18 @@ def _struktur_rang(k):
 
 
 def _chart_hierarchie(kandidaten, entry):
-    """Sortiert charttechnisch per if/elif-Hierarchie, nicht per Score."""
-    oberhalb = [k for k in kandidaten if k.get("seite") == "widerstand" and float(k["preis"]) > entry]
-    # Innerhalb derselben Chartklasse entscheidet der naechste Preis; CRV wird
-    # erst danach berechnet und darf die Chartreihenfolge nicht veraendern.
-    return sorted(oberhalb, key=lambda k: (_struktur_rang(k)[0], float(k["preis"])))
+    """Liefert alle aktuell relevanten Widerstaende strikt nach Preisnaehe.
+
+    Die Chartart/Zeitebene bleibt als Diagnose erhalten, bestimmt aber nicht mehr
+    das Ueberspringen eines naeheren Widerstands. Zuerst kommt der naechste
+    charttechnische Widerstand oberhalb des Entries, danach der naechste usw.;
+    erst fuer jeden Kandidaten wird das CRV berechnet.
+    """
+    oberhalb = [
+        k for k in kandidaten
+        if k.get("seite") == "widerstand" and float(k["preis"]) > entry
+    ]
+    return sorted(oberhalb, key=lambda k: float(k["preis"]))
 
 def _rollenwechsel_aktuell_gueltig(kandidat, aktueller_kurs):
     """Prueft nur die aktuelle Rolle eines bereits bestaetigten Rollenwechsels.
@@ -550,7 +557,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
             for k in _chart_hierarchie(kandidaten, hypothetischer_entry)
         ],
-        "regel": "Nur Diagnose der Widerstandskette. Chart-Hierarchie zuerst, CRV danach. Kein Trade ohne bestaetigten charttechnischen Entry. CRV > 1 ist Zulassung, kein Score; TP2 ist die naechste hoehere charttechnische Struktur nach derselben Hierarchie mit CRV >= 2.",
+        "regel": "Nur Diagnose der Widerstandskette. Naechster Preis zuerst, Chartart/Zeitebene als Begruendung, CRV danach. Kein Trade ohne bestaetigten charttechnischen Entry. CRV > 1 ist Zulassung, kein Score; TP2 ist die unmittelbar naechste hoehere Struktur mit CRV >= 2.",
     }
 
     return {
@@ -576,7 +583,7 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "tp2": tp2,
             "tp2_pruefung": tp2_pruefung,
             "alle_tp_kandidaten": tp_candidates,
-            "regel": "Chart-Hierarchie bestimmt die Pruefreihenfolge; erst danach CRV. CRV > 1 ist nur Zulassung. TP2 = unmittelbar naechste hoehere charttechnische Struktur; wenn diese CRV < 2 hat, wird keine spaetere Struktur uebersprungen. Kein Score, kein 2R/3R-Fallback.",
+            "regel": "Alle aktuell gueltigen Widerstandskandidaten werden strikt nach Preis aufsteigend geprueft; Chartart/Zeitebene dient der Begruendung. Erst danach CRV. CRV > 1 ist nur Zulassung. TP2 = unmittelbar naechste hoehere Struktur; wenn diese CRV < 2 hat, wird keine spaetere Struktur uebersprungen. Kein Score, kein 2R/3R-Fallback.",
         },
         "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
