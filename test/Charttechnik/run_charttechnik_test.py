@@ -110,6 +110,41 @@ def _kandidat_view(k, entry, stop):
     }
 
 
+def _struktur_rang(k):
+    """Echte if/elif-Hierarchie fuer charttechnische Relevanz.
+
+    Kein Score und keine numerische Gewichtung: Die Rangfolge beschreibt nur,
+    welche aktuelle Chartstruktur zuerst geprueft wird. Erst danach kommt CRV.
+    """
+    typ = str(k.get("typ", "")).lower()
+    ebene = str(k.get("ebene", "")).lower()
+    dynamisch = bool(k.get("dynamisch"))
+    quelle = str(k.get("quelle", "")).lower()
+
+    if ebene == "intraday" and typ == "umkehrzone":
+        return 1, "aktuelle_intraday_umkehrzone"
+    if ebene == "intraday" and dynamisch and k.get("seite") == "widerstand":
+        return 2, "aktuelle_dynamische_kanalgrenze"
+    if ebene == "intraday" and typ == "kanal":
+        return 3, "intraday_kanalstruktur"
+    if ebene == "intraday":
+        return 3, "weitere_intraday_struktur"
+    if ebene == "6m":
+        return 4, "6m_struktur"
+    if ebene == "tageschart":
+        return 5, "tageschart_struktur"
+    if "widerstand" in quelle or "support" in quelle:
+        return 7, "sonstige_chartstruktur"
+    return 8, "sonstige_struktur"
+
+
+def _chart_hierarchie(kandidaten, entry):
+    """Sortiert charttechnisch per if/elif-Hierarchie, nicht per Score."""
+    oberhalb = [k for k in kandidaten if k.get("seite") == "widerstand" and float(k["preis"]) > entry]
+    # Innerhalb derselben Chartklasse entscheidet der naechste Preis; CRV wird
+    # erst danach berechnet und darf die Chartreihenfolge nicht veraendern.
+    return sorted(oberhalb, key=lambda k: (_struktur_rang(k)[0], float(k["preis"])))
+
 def _rollenwechsel_aktuell_gueltig(kandidat, aktueller_kurs):
     """Prueft nur die aktuelle Rolle eines bereits bestaetigten Rollenwechsels.
 
@@ -286,17 +321,17 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
 
     tp_candidates = []
     if test_entry is not None and risiko and risiko > 0:
-        for r in sorted(
-            [k for k in kandidaten if k.get("seite") == "widerstand" and float(k["preis"]) > test_entry],
-            key=lambda k: float(k["preis"]),
-        ):
+        for r in _chart_hierarchie(kandidaten, test_entry):
             preis = float(r["preis"])
             crv = (preis - test_entry) / risiko
             row = _kandidat_view(r, test_entry, stop)
             row["aktuelle_rolle_gueltig"] = True
             row["crv"] = crv
+            row["chart_rang"] = _struktur_rang(r)[0]
+            row["chart_rang_begruendung"] = _struktur_rang(r)[1]
             row["verworfen"] = crv <= 1.0
             row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
+            row["auswahlbegruendung"] = ("charttechnisch_erste_gueltige_struktur; CRV > 1" if crv > 1.0 else "charttechnische_struktur_geprueft; CRV <= 1")
             tp_candidates.append(row)
 
     gueltig_tp1 = [x for x in tp_candidates if not x["verworfen"]]
@@ -319,6 +354,10 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
     )
     hypothetischer_stop_basis = hypo_stop_candidates[0] if hypo_stop_candidates else None
     hypothetischer_stop = float(hypothetischer_stop_basis["preis"]) if hypothetischer_stop_basis else None
+    hypothetischer_stop_regel = (
+        "naechste_gueltige_supportstruktur; keine kuenstliche zone/puffer-berechnung ohne explizite zonengrenzen"
+        if hypothetischer_stop_basis else "keine_gueltige_supportstruktur"
+    )
     hypothetisches_risiko = (
         hypothetischer_entry - hypothetischer_stop
         if hypothetischer_stop is not None and hypothetischer_stop < hypothetischer_entry
@@ -327,17 +366,17 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
 
     hypothetische_tp_kandidaten = []
     if hypothetisches_risiko and hypothetisches_risiko > 0:
-        for r in sorted(
-            [k for k in kandidaten if k.get("seite") == "widerstand" and float(k["preis"]) > hypothetischer_entry],
-            key=lambda k: float(k["preis"]),
-        ):
+        for r in _chart_hierarchie(kandidaten, hypothetischer_entry):
             preis = float(r["preis"])
             crv = (preis - hypothetischer_entry) / hypothetisches_risiko
             row = _kandidat_view(r, hypothetischer_entry, hypothetischer_stop)
             row["aktuelle_rolle_gueltig"] = True
             row["crv"] = crv
+            row["chart_rang"] = _struktur_rang(r)[0]
+            row["chart_rang_begruendung"] = _struktur_rang(r)[1]
             row["verworfen"] = crv <= 1.0
             row["verwerfungsgrund"] = "CRV <= 1" if crv <= 1.0 else None
+            row["auswahlbegruendung"] = ("charttechnisch_erste_gueltige_struktur; CRV > 1" if crv > 1.0 else "charttechnische_struktur_geprueft; CRV <= 1")
             row["auswahlstufe"] = "TP1-erster-gueltiger" if crv > 1.0 else "vor_TP1_verworfen"
             hypothetische_tp_kandidaten.append(row)
 
@@ -359,10 +398,15 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
         "hypothetischer_stop": hypothetischer_stop,
         "hypothetischer_stop_basis": hypothetischer_stop_basis,
         "hypothetisches_risiko": hypothetisches_risiko,
+        "hypothetischer_stop_regel": hypothetischer_stop_regel,
         "tp1": hypo_tp1,
         "tp2": hypo_tp2,
         "alle_tp_kandidaten": hypothetische_tp_kandidaten,
-        "regel": "Nur Diagnose der Widerstandskette. Kein Trade ohne bestaetigten charttechnischen Entry. CRV > 1 ist Zulassung, kein Score; TP2 naechste hoehere Huerde mit CRV >= 2.",
+        "chart_hierarchie": [
+            {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
+            for k in _chart_hierarchie(kandidaten, hypothetischer_entry)
+        ],
+        "regel": "Nur Diagnose der Widerstandskette. Chart-Hierarchie zuerst, CRV danach. Kein Trade ohne bestaetigten charttechnischen Entry. CRV > 1 ist Zulassung, kein Score; TP2 ist die naechste hoehere charttechnische Struktur nach derselben Hierarchie mit CRV >= 2.",
     }
 
     return {
@@ -379,13 +423,13 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             "basis": stop_basis,
             "alle_stop_support_kandidaten": stop_candidates,
             "risiko": risiko,
-            "regel": "Stop auf/unter der naechsten aktuell gueltigen Supportstruktur unter dem bestaetigten Entry; ein konkreter Unter-der-Zone-Puffer wird noch nicht erfunden.",
+            "regel": "Stop wird aus der charttechnischen Supportstruktur abgeleitet; wenn die Quelle keine explizite Zonengrenze liefert, wird kein kuenstlicher Puffer erfunden. Die naechste Teststufe muss Zonengrenzen aus den Rohdaten liefern, bevor ein exakter Unter-Zonen-Stop berechnet wird.",
         },
         "tp": {
             "tp1": tp1,
             "tp2": tp2,
             "alle_tp_kandidaten": tp_candidates,
-            "regel": "Naechste charttechnische Widerstandshuerde oberhalb Entry; CRV > 1 ist nur Zulassung. TP2 = naechste hoehere Huerde mit CRV >= 2. Kein Score, kein 2R/3R-Fallback.",
+            "regel": "Chart-Hierarchie bestimmt die Pruefreihenfolge; erst danach CRV. CRV > 1 ist nur Zulassung. TP2 = naechste hoehere charttechnische Struktur mit CRV >= 2. Kein Score, kein 2R/3R-Fallback.",
         },
         "hypothetische_tp_kette": hypothetische_tp_kette,
         "rollenwechsel": {
