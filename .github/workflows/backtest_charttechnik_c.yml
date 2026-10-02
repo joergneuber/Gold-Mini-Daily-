@@ -1,0 +1,66 @@
+name: Backtest Charttechnik C (XAU/USD)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Startdatum des 1h-Backtests"
+        required: false
+        default: "2019-01-01"
+        type: string
+      eval_every_n_bars:
+        description: "Jede n-te abgeschlossene 1h-Kerze als Entscheidungszeitpunkt"
+        required: false
+        default: "1"
+        type: string
+      max_eval_bars:
+        description: "0 = gesamte Historie, sonst nur die letzten n Entscheidungsbars"
+        required: false
+        default: "0"
+        type: string
+
+jobs:
+  backtest:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Abhängigkeiten installieren
+        run: pip install requests pandas numpy
+
+      - name: Statische Prüfung
+        run: |
+          python -m py_compile test/Charttechnik/mini_daily_gold.py
+          python -m py_compile test/Charttechnik/run_charttechnik_test.py
+          python -m py_compile backtest/backtest_charttechnik_c.py
+          python -m py_compile test/test_charttechnik_c_rules.py
+
+      - name: Regeltests
+        run: python test/test_charttechnik_c_rules.py
+
+      - name: Historischen C-Signaltest ausführen
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          C_START_DATE: ${{ inputs.start_date }}
+          C_EVAL_EVERY_N_BARS: ${{ inputs.eval_every_n_bars }}
+          C_MAX_EVAL_BARS: ${{ inputs.max_eval_bars }}
+        run: python backtest/backtest_charttechnik_c.py
+
+      - name: Ergebnisse als Artefakte sichern
+        uses: actions/upload-artifact@v6
+        with:
+          name: backtest-charttechnik-c
+          path: |
+            backtest_charttechnik_c_signale.csv
+            backtest_charttechnik_c_kennzahlen.json
+            charttechnik_c_1h_daten.csv
+            charttechnik_c_daily_daten.csv
+          if-no-files-found: error
