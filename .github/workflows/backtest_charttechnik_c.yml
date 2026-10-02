@@ -34,7 +34,7 @@ jobs:
           python-version: "3.11"
 
       - name: Abhängigkeiten installieren
-        run: pip install requests pandas numpy
+        run: pip install requests pandas numpy matplotlib
 
       - name: Statische Prüfung
         run: |
