@@ -202,6 +202,20 @@ def _konsolidiere_nahe_zielstrukturen(kandidaten, toleranz=3.0):
             last["zusammengefasste_preise"] = sorted(set(
                 [float(last["preis"]), float(k["preis"])]
             ))
+            if last.get("untere_grenze") is not None or k.get("untere_grenze") is not None:
+                grenzen_unten = [
+                    float(v) for v in (last.get("untere_grenze"), k.get("untere_grenze"))
+                    if v is not None
+                ]
+                if grenzen_unten:
+                    last["untere_grenze"] = min(grenzen_unten)
+            if last.get("obere_grenze") is not None or k.get("obere_grenze") is not None:
+                grenzen_oben = [
+                    float(v) for v in (last.get("obere_grenze"), k.get("obere_grenze"))
+                    if v is not None
+                ]
+                if grenzen_oben:
+                    last["obere_grenze"] = max(grenzen_oben)
         else:
             out.append(dict(k))
     return out
@@ -258,6 +272,101 @@ def _tp_kandidaten_diagnose(kandidaten, entry, stop, tp1_crv=1.0):
                 row["auswahlstufe"] = "nach_TP1_nicht_ausgewaehlt"
                 row["auswahlbegruendung"] = "charttechnisch_gueltig; CRV > 1, aber TP1 bereits durch naehere gueltige Struktur bestimmt"
     return rows
+
+
+def _ermittle_tp_kette(kandidaten, entry, stop, tp1_crv=1.0, tp2_crv=2.0):
+    """Ermittelt die endgültige TP-Kette nach der verbindlichen Chartregel.
+
+    - Rohstrukturen werden innerhalb von 3,0 Punkten zu einer Chartzone
+      konsolidiert.
+    - TP1 ist die erste aktuell gültige Struktur oberhalb des Entries mit
+      CRV > 1.
+    - TP2 ist ausschließlich die unmittelbar nächste aktuell gültige
+      Struktur nach TP1 mit CRV >= 2.
+    - Ist diese nächste Struktur unter 2R, bleibt TP2 leer; spätere
+      Strukturen werden nicht geprüft/übersprungen.
+    """
+    kandidaten_zone = _konsolidiere_nahe_zielstrukturen(
+        [k for k in kandidaten if k.get("seite") == "widerstand"],
+        toleranz=3.0,
+    )
+    rows = _tp_kandidaten_diagnose(
+        kandidaten_zone, float(entry), stop, tp1_crv=tp1_crv
+    )
+    gueltig_tp1 = [
+        x for x in rows
+        if x.get("charttechnisch_gueltig") and not x.get("verworfen")
+    ]
+    tp1 = gueltig_tp1[0] if gueltig_tp1 else None
+    tp2 = None
+    tp2_pruefung = None
+
+    if tp1 is None:
+        return {
+            "tp1": None,
+            "tp2": None,
+            "tp2_pruefung": {
+                "status": "kein_tp1",
+                "grund": "keine_charttechnisch_gueltige_struktur_mit_crv_gt_1",
+            },
+            "alle_tp_kandidaten": rows,
+        }
+
+    naechster = next(
+        (
+            x for x in rows
+            if x["preis"] > tp1["preis"] + 1e-6
+            and x.get("charttechnisch_gueltig")
+        ),
+        None,
+    )
+    if naechster is None:
+        tp2_pruefung = {
+            "status": "nicht_vorhanden",
+            "grund": "keine_hoeherliegende_gueltige_chartstruktur",
+            "spaetere_strukturen_geprueft": False,
+        }
+    elif naechster.get("crv") is not None and naechster["crv"] >= tp2_crv:
+        tp2 = naechster
+        tp2["auswahlstufe"] = "TP2-naechste-gueltige-struktur"
+        tp2["auswahlbegruendung"] = (
+            "charttechnischer_grund_vorhanden; "
+            "naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2"
+        )
+        tp2_pruefung = {
+            "status": "zugelassen",
+            "grund": "naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2",
+            "kandidat": naechster,
+            "spaetere_strukturen_geprueft": False,
+        }
+    else:
+        naechster["verworfen"] = True
+        naechster["verwerfungsgrund"] = (
+            "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; "
+            "keine spaetere Struktur wird uebersprungen"
+        )
+        naechster["auswahlstufe"] = "TP2-verworfen"
+        naechster["auswahlbegruendung"] = (
+            "charttechnischer_grund_vorhanden; "
+            "naechste_hoeherliegende_gueltige_chartstruktur; CRV < 2"
+        )
+        tp2_pruefung = {
+            "status": "nicht_vorhanden",
+            "grund": (
+                "TP2 nicht vorhanden – keine spaetere Struktur geprüft; "
+                "die unmittelbar naechste gueltige Struktur hat CRV < 2"
+            ),
+            "kandidat": naechster,
+            "spaetere_strukturen_geprueft": False,
+        }
+
+    return {
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp2_pruefung": tp2_pruefung,
+        "alle_tp_kandidaten": rows,
+    }
+
 
 def _rollenwechsel_bestaetigung(rw):
     """Prueft, ob ein Rollenwechsel charttechnisch ausreichend bestaetigt ist.
@@ -651,45 +760,13 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
             })
     risiko = (test_entry - stop) if test_entry is not None and stop is not None else None
 
-    tp_candidates = []
+    tp_kette = {"tp1": None, "tp2": None, "tp2_pruefung": None, "alle_tp_kandidaten": []}
     if test_entry is not None and risiko and risiko > 0:
-        tp_candidates = _tp_kandidaten_diagnose(
-            _konsolidiere_nahe_zielstrukturen(
-                [k for k in kandidaten if k.get("seite") == "widerstand"], toleranz=0.25
-            ), test_entry, stop, tp1_crv=1.0
-        )
-
-    gueltig_tp1 = [x for x in tp_candidates if x.get("charttechnisch_gueltig") and not x["verworfen"]]
-    tp1 = gueltig_tp1[0] if gueltig_tp1 else None
-    tp2 = None
-    tp2_pruefung = None
-    if tp1 is not None:
-        naechster = next(
-            (x for x in tp_candidates if x["preis"] > tp1["preis"] + 1e-6 and x.get("charttechnisch_gueltig")),
-            None,
-        )
-        if naechster is None:
-            tp2_pruefung = {"status": "keine_hoeherliegende_gueltige_chartstruktur"}
-        elif naechster.get("crv") is not None and naechster["crv"] >= 2.0:
-            tp2 = naechster
-            tp2["auswahlstufe"] = "TP2-naechste-gueltige-struktur"
-            tp2["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2"
-            tp2_pruefung = {
-                "status": "zugelassen",
-                "grund": "naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2",
-                "kandidat": naechster,
-            }
-        else:
-            naechster["verworfen"] = True
-            naechster["verwerfungsgrund"] = "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen"
-            naechster["auswahlstufe"] = "TP2-verworfen"
-            naechster["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV < 2"
-            tp2_pruefung = {
-                "status": "nicht_vorhanden",
-                "grund": "TP2 nicht vorhanden – keine spaetere Struktur geprüft; die unmittelbar naechste gueltige Struktur hat CRV < 2",
-                "kandidat": naechster,
-                "spaetere_strukturen_geprueft": False,
-            }
+        tp_kette = _ermittle_tp_kette(kandidaten, test_entry, stop)
+    tp_candidates = tp_kette["alle_tp_kandidaten"]
+    tp1 = tp_kette["tp1"]
+    tp2 = tp_kette["tp2"]
+    tp2_pruefung = tp_kette["tp2_pruefung"]
 
     # HYPOTHETISCHE TP-KETTE: reine Diagnose, niemals Trade-Auswahl.
     # Sie verwendet den aktuellen Kurs nur als hypothetischen Entry, damit TP1/TP2
@@ -726,47 +803,6 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
         else None
     )
 
-    hypothetische_tp_kandidaten = []
-    if hypothetisches_risiko and hypothetisches_risiko > 0:
-        hypothetische_tp_kandidaten = _tp_kandidaten_diagnose(
-            _konsolidiere_nahe_zielstrukturen(
-                [k for k in kandidaten if k.get("seite") == "widerstand"], toleranz=0.25
-            ), hypothetischer_entry, hypothetischer_stop, tp1_crv=1.0
-        )
-
-    hypo_gueltig = [x for x in hypothetische_tp_kandidaten if x.get("charttechnisch_gueltig") and not x["verworfen"]]
-    hypo_tp1 = hypo_gueltig[0] if hypo_gueltig else None
-    hypo_tp2 = None
-    hypo_tp2_pruefung = None
-    if hypo_tp1 is not None:
-        hypo_naechster = next(
-            (x for x in hypothetische_tp_kandidaten
-             if x["preis"] > hypo_tp1["preis"] + 1e-6 and x.get("charttechnisch_gueltig")),
-            None,
-        )
-        if hypo_naechster is None:
-            hypo_tp2_pruefung = {"status": "keine_hoeherliegende_gueltige_chartstruktur"}
-        elif hypo_naechster.get("crv") is not None and hypo_naechster["crv"] >= 2.0:
-            hypo_tp2 = hypo_naechster
-            hypo_tp2["auswahlstufe"] = "TP2-naechste-gueltige-struktur"
-            hypo_tp2["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2"
-            hypo_tp2_pruefung = {
-                "status": "zugelassen",
-                "grund": "naechste_hoeherliegende_gueltige_chartstruktur; CRV >= 2",
-                "kandidat": hypo_naechster,
-            }
-        else:
-            hypo_naechster["verworfen"] = True
-            hypo_naechster["verwerfungsgrund"] = "naechste_hoeherliegende_gueltige_chartstruktur hat CRV < 2; keine spaetere Struktur wird uebersprungen"
-            hypo_naechster["auswahlstufe"] = "TP2-verworfen"
-            hypo_naechster["auswahlbegruendung"] = "charttechnischer_grund_vorhanden; naechste_hoeherliegende_gueltige_chartstruktur; CRV < 2"
-            hypo_tp2_pruefung = {
-                "status": "nicht_vorhanden",
-                "grund": "TP2 nicht vorhanden – keine spaetere Struktur geprüft; die unmittelbar naechste gueltige Struktur hat CRV < 2",
-                "kandidat": hypo_naechster,
-                "spaetere_strukturen_geprueft": False,
-            }
-
     hypothetische_tp_kette = {
         "diagnostisch_nur": True,
         "trade_ausloesen": False,
@@ -778,16 +814,29 @@ def _build_structure_chain(setup, intraday, daily, kurs, kanal_aktuell=None):
         "hypothetisches_risiko": hypothetisches_risiko,
         "hypothetischer_stop_regel": hypothetischer_stop_regel,
         "hypothetischer_stop_diagnose": hypothetischer_stop_diagnose,
-        "tp1": hypo_tp1,
-        "tp2": hypo_tp2,
-        "tp2_pruefung": hypo_tp2_pruefung,
-        "alle_tp_kandidaten": hypothetische_tp_kandidaten,
+        "tp1": None,
+        "tp2": None,
+        "tp2_pruefung": None,
+        "alle_tp_kandidaten": [],
         "chart_hierarchie": [
             {"chart_rang": _struktur_rang(k)[0], "begruendung": _struktur_rang(k)[1], "preis": float(k["preis"]), "typ": k.get("typ"), "ebene": k.get("ebene"), "quelle": k.get("quelle")}
             for k in _chart_hierarchie(kandidaten, hypothetischer_entry)
         ],
-        "regel": "Charttechnischer Grund ist zwingend. Aktuelle Chartrolle und Preisnaehe bestimmen die Kandidaten; erst danach wird CRV berechnet. CRV > 1 ist nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP1 ist Pflicht fuer einen zulaessigen Trade. TP2 ist optional: Nur die unmittelbar naechste hoehere gueltige Chartstruktur wird geprueft; CRV >= 2 ist nur deren Zulassungsfilter. Erfuellt diese Struktur CRV < 2, ist TP2 nicht vorhanden und es werden keine spaeteren Strukturen geprueft oder uebersprungen. Die aktuelle Rolle bestimmt die Funktion. R->S bleibt Support, bis ein spaeterer bestaetigter S->R-Wechsel vorliegt; S->R bleibt Widerstand, bis ein spaeterer bestaetigter R->S-Wechsel vorliegt.",
     }
+    if hypothetisches_risiko and hypothetisches_risiko > 0:
+        hypo_kette = _ermittle_tp_kette(kandidaten, hypothetischer_entry, hypothetischer_stop)
+        hypothetische_tp_kette.update(hypo_kette)
+
+    hypothetische_tp_kette["regel"] = (
+        "Charttechnischer Grund ist zwingend. Aktuelle Chartrolle und Preisnaehe "
+        "bestimmen die Kandidaten; erst danach wird CRV berechnet. CRV > 1 ist "
+        "nur Zulassung fuer TP1, kein Score und keine Auswahlbegruendung. TP1 "
+        "ist Pflicht fuer einen zulaessigen Trade. TP2 ist optional: Nur die "
+        "unmittelbar naechste hoehere gueltige Chartstruktur wird geprueft; "
+        "CRV >= 2 ist nur deren Zulassungsfilter. Erfuellt diese Struktur CRV < 2, "
+        "ist TP2 nicht vorhanden und es werden keine spaeteren Strukturen geprueft "
+        "oder uebersprungen. Die aktuelle Rolle bestimmt die Funktion."
+    )
 
     richtung = _uebergeordnete_richtung(intraday, daily)
     return {
