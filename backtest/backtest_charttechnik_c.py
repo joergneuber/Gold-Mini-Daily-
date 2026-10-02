@@ -2,17 +2,24 @@
 """Historischer Signal-Backtest fuer die neue Charttechnik C.
 
 WICHTIG:
-- C wird hier noch NICHT als fertiges Profitabilitaetssystem bewertet.
-- Der Backtest prueft die Signal-/Zielqualitaet der neuen Chartkette:
-  bestaetigter Entry -> struktureller Stop -> TP1 -> optionales TP2.
+- C wird als Signal- UND Positionsmanagement-Backtest bewertet.
+- Der Backtest prueft die vollständige Kette:
+  bestaetigter Entry -> struktureller Stop -> TP1 -> flexibles Positionsmanagement -> TP2/Trailing-Stop.
 - Es werden keine 2R-/3R-Fallbacks erzeugt.
 - TP2 wird nur als unmittelbar naechste gueltige Struktur zugelassen.
 - Die spaetere Struktur darf bei CRV < 2 nicht uebersprungen werden.
 - Fuer jeden historischen Entscheidungszeitpunkt werden nur Daten bis zu
   diesem Zeitpunkt verwendet. Tagesdaten werden waehrend des Intraday-Tages
   bewusst NICHT vorzeitig verwendet.
-- Eine wirtschaftliche C-P&L-Auswertung erfolgt erst, wenn die finale
-  Positionsverwaltung fuer C festgelegt ist.
+- Teilverkaeufe sind ausgeschlossen: C verwaltet immer 100 % der Position.
+- TP1 ist ein Managementpunkt, kein automatischer Verkauf: bei Fortsetzung wird
+  die Position gehalten; der Stop wird mindestens auf Break-even und danach
+  unter bestaetigte Higher-Lows/Swing-Lows nachgezogen. Bei Schwaeche wird die
+  Position ueber den nachgezogenen Stop vollstaendig geschlossen.
+- TP2 erreicht -> 100 % Exit. Ohne TP2 wird die Position weiter strukturbasiert
+  ueber den Trailing-Stop verwaltet.
+- Es wird kein Look-ahead verwendet: Stop-Nachzuege duerfen nur auf bereits
+  bestaetigten, abgeschlossenen Bars/Strukturen beruhen.
 """
 
 import importlib.util
@@ -50,7 +57,7 @@ TEST_MODULE_PATH = ROOT / "test" / "Charttechnik" / "mini_daily_gold.py"
 SYMBOL = "XAU/USD"
 INTERVALL = "1h"
 START_DATUM = date.fromisoformat(os.getenv("C_START_DATE", "2019-01-01"))
-CHUNK_TAGE = int(os.getenv("C_CHUNK_DAYS", "200"))
+CHUNK_TAGE = int(os.getenv("C_CHUNK_DAYS", "180"))
 WARMUP_TAGE = int(os.getenv("C_WARMUP_DAYS", "180"))
 EVAL_EVERY_N_BARS = max(1, int(os.getenv("C_EVAL_EVERY_N_BARS", "1")))
 MAX_EVAL_BARS = int(os.getenv("C_MAX_EVAL_BARS", "0"))
@@ -250,7 +257,7 @@ def hole_daten():
         if not teil.empty:
             teile.append(teil)
         start = ende + timedelta(days=1)
-        time.sleep(5)
+        time.sleep(8)
 
     if not teile:
         raise RuntimeError("Keine XAU/USD-1h-Daten erhalten.")
@@ -325,11 +332,105 @@ def hole_tagesdaten(stunden):
     raise RuntimeError("Keine Tagesdaten erhalten.")
 
 
+def _bestaetigtes_swing_low_am_bar(intraday_hist, lookback=2):
+    """Prueft nur den zuletzt bestaetigbaren Swing-Low-Punkt.
+
+    Der Pivot liegt ``lookback`` Bars zurueck. Erst nachdem die rechten
+    Bestaetigungs-Bars abgeschlossen sind, darf er fuer den Stop verwendet
+    werden. Dadurch bleibt die Pruefung schnell und look-ahead-frei.
+    """
+    if len(intraday_hist) < 2 * lookback + 1:
+        return None
+
+    pivot_index = len(intraday_hist) - lookback - 1
+    lows = pd.to_numeric(intraday_hist["Low"], errors="coerce")
+    value = lows.iloc[pivot_index]
+    if pd.isna(value):
+        return None
+
+    links = lows.iloc[pivot_index - lookback:pivot_index]
+    rechts = lows.iloc[pivot_index + 1:pivot_index + lookback + 1]
+    if value <= links.min() and value <= rechts.min():
+        return {
+            "index": int(pivot_index),
+            "zeit": str(lows.index[pivot_index]),
+            "preis": float(value),
+        }
+    return None
+
+
+def _management_snapshot(stunden, i, position):
+    """Liefert den neu bestaetigten Swing-Low/Higher-Low-Punkt.
+
+    Die C-Regel benoetigt nach TP1 keinen erneuten kompletten Entry/TP-Aufbau.
+    TP2 bleibt das beim Entry bestimmte naechste Strukturziel; fuer das
+    Positionsmanagement wird nur geprueft, ob inzwischen ein neues, hoeheres
+    und bereits bestaetigtes Swing-Low entstanden ist.
+    """
+    intraday_hist = stunden.iloc[: i + 1]
+    swing_low = _bestaetigtes_swing_low_am_bar(intraday_hist)
+    higher_low = None
+    if swing_low is not None:
+        if position.get("letztes_swing_low") is None:
+            if swing_low["preis"] > position["entry"]:
+                higher_low = swing_low
+        elif swing_low["preis"] > float(position["letztes_swing_low"]):
+            higher_low = swing_low
+
+    return {
+        "swing_low": higher_low,
+        "higher_low_confirmed": higher_low is not None,
+        "next_target": position.get("tp2"),
+        "next_target_crv": position.get("tp2_crv"),
+    }
+
+
+def _update_post_tp1_management(stunden, i, ts, close, position):
+    """Aktualisiert den Stop nach TP1 ohne Teilverkauf.
+
+    Regel: TP1 ist nur ein Managementpunkt. Die Position bleibt vollstaendig
+    offen. Der Stop wird zunaechst mindestens auf Break-even angehoben und
+    danach nur auf bereits bestaetigte Higher-Lows/Swing-Lows angehoben.
+    """
+    snapshot = _management_snapshot(stunden, i, position)
+    old_stop = float(position["stop"])
+    new_stop = max(old_stop, float(position["entry"]))
+    stop_basis = "break_even_nach_TP1"
+
+    swing_low = snapshot.get("swing_low")
+    if swing_low is not None:
+        candidate = float(swing_low["preis"])
+        if candidate > new_stop and candidate < close:
+            new_stop = candidate
+            stop_basis = "bestaetigtes_Higher-Low_Swing-Low"
+            position["letztes_swing_low"] = candidate
+            position["letztes_swing_low_zeit"] = swing_low["zeit"]
+
+    position["stop"] = new_stop
+    position["stop_basis_aktuell"] = stop_basis
+    position["stop_nach_tp1"] = True
+    position["management_letzte_pruefung"] = str(ts)
+    position["management_naechstes_ziel"] = (
+        float(snapshot["next_target"]) if snapshot.get("next_target") is not None else None
+    )
+    position["management_naechstes_ziel_crv"] = snapshot.get("next_target_crv")
+    position["management_swing_low"] = (
+        float(swing_low["preis"]) if swing_low is not None else position.get("management_swing_low")
+    )
+    position["management_entscheidung"] = (
+        "POSITION_HALTEN_BIS_TP2_ODER_TRAILING_STOP"
+        if position.get("tp2") is not None
+        else "POSITION_WEITER_STRUKTURBASIERT_TRAILEN"
+    )
+    return position
+
+
 def historische_signale(stunden):
     daily = hole_tagesdaten(stunden)
     if len(daily) < 180:
         raise RuntimeError("Zu wenig Tageshistorie fuer die 6M-Struktur.")
 
+    start_index = max(1, int(len(stunden) * 0))
     warmup_ts = stunden.index[0] + pd.Timedelta(days=WARMUP_TAGE)
     eligible = [
         i for i, ts in enumerate(stunden.index)
@@ -340,24 +441,17 @@ def historische_signale(stunden):
 
     trades = []
     in_observation = None
+    letzte_pruefung = None
 
-    # Cache fuer die abgeschlossene Tageshistorie. Alle Intraday-Bars desselben
-    # UTC-Tages verwenden exakt dieselbe Tageshistorie; die bisherige boolesche
-    # DataFrame-Selektion wurde deshalb bei jeder Stunde erneut ausgefuehrt.
-    daily_hist_cache = {}
-
-    gesamt = len(eligible)
     for pos, i in enumerate(eligible):
         if pos % EVAL_EVERY_N_BARS:
             continue
-        if pos and pos % 1000 == 0:
-            print(f"C-Backtest Fortschritt: {pos}/{gesamt} Bars ({pos / gesamt * 100:.1f}%)")
 
         ts = stunden.index[i]
         bar = stunden.iloc[i]
         close = float(bar["Close"])
 
-        # Bereits laufendes Signal: nur Ziel-/Stop-Erreichung beobachten.
+        # Bereits laufendes Signal: Positionsmanagement nach den finalen C-Regeln.
         if in_observation is not None:
             if i <= in_observation["entry_index"]:
                 continue
@@ -365,14 +459,29 @@ def historische_signale(stunden):
             high = float(bar["High"])
             low = float(bar["Low"])
 
+            # Nach TP1 wird die Position NICHT teilverkauft. Der Management-Stop
+            # wird nur auf Basis bereits bestaetigter Strukturen nachgezogen.
+            if in_observation["tp1_erreicht"]:
+                _update_post_tp1_management(
+                    stunden, i, ts, close, in_observation
+                )
+
             # Konservativ: Stop vor Ziel, falls beides in derselben Kerze liegt.
+            # Der Stop wird nie rueckwirkend innerhalb der TP1-Kerze angewendet;
+            # die TP1-Kerze wird erst nach ihrer Auswertung fuer das Management
+            # des Folgebars verwendet.
             if in_observation["stop"] is not None and low <= in_observation["stop"]:
                 if in_observation["tp1_erreicht"]:
                     in_observation["zweites_ereignis"] = "STOP_NACH_TP1"
                 else:
                     in_observation["erstes_ereignis"] = "STOP_VOR_TP1"
-                    in_observation["ausstieg_index"] = i
-                    in_observation["ausstieg_zeit"] = str(ts)
+                in_observation["ausstieg_index"] = i
+                in_observation["ausstieg_zeit"] = str(ts)
+                in_observation["ausstieg_preis"] = float(in_observation["stop"])
+                in_observation["rendite_pct"] = round(
+                    (float(in_observation["stop"]) / in_observation["entry"] - 1.0) * 100.0,
+                    4,
+                )
                 trades.append(dict(in_observation))
                 in_observation = None
                 continue
@@ -381,6 +490,13 @@ def historische_signale(stunden):
                 in_observation["tp1_erreicht"] = True
                 in_observation["tp1_zeit"] = str(ts)
                 in_observation["tp1_bars_nach_entry"] = i - in_observation["entry_index"]
+
+                # TP1 = Managementpunkt, kein Verkauf. Ab hier mindestens
+                # Break-even; weitere Stop-Nachzuege erfolgen nur ueber bestaetigte
+                # Higher-Lows/Swing-Lows.
+                _update_post_tp1_management(
+                    stunden, i, ts, close, in_observation
+                )
 
             if (
                 in_observation["tp1_erreicht"]
@@ -392,6 +508,12 @@ def historische_signale(stunden):
                 in_observation["zweites_ereignis"] = "TP2"
                 in_observation["ausstieg_index"] = i
                 in_observation["ausstieg_zeit"] = str(ts)
+                in_observation["ausstieg_preis"] = float(in_observation["tp2"])
+                in_observation["rendite_pct"] = round(
+                    (float(in_observation["tp2"]) / in_observation["entry"] - 1.0) * 100.0,
+                    4,
+                )
+                in_observation["management_entscheidung"] = "TP2_100_PROZENT_EXIT"
                 trades.append(dict(in_observation))
                 in_observation = None
                 continue
@@ -399,9 +521,14 @@ def historische_signale(stunden):
             if i - in_observation["entry_index"] >= HORIZON_BARS:
                 in_observation["ausstieg_index"] = i
                 in_observation["ausstieg_zeit"] = str(ts)
+                in_observation["ausstieg_preis"] = close
                 in_observation["zweites_ereignis"] = (
                     "HORIZONT_NACH_TP1" if in_observation["tp1_erreicht"]
                     else "HORIZONT_OHNE_TP1"
+                )
+                in_observation["rendite_pct"] = round(
+                    (close / in_observation["entry"] - 1.0) * 100.0,
+                    4,
                 )
                 trades.append(dict(in_observation))
                 in_observation = None
@@ -411,12 +538,7 @@ def historische_signale(stunden):
 
         # Nur abgeschlossene Tagesdaten verwenden: die aktuelle Tageskerze
         # ist waehrend eines Intraday-Checks noch nicht vollstaendig bekannt.
-        day_key = pd.Timestamp(ts).normalize()
-        daily_hist = daily_hist_cache.get(day_key)
-        if daily_hist is None:
-            daily_end = daily.index.searchsorted(day_key, side="left")
-            daily_hist = daily.iloc[:daily_end]
-            daily_hist_cache[day_key] = daily_hist
+        daily_hist = daily[daily.index < pd.Timestamp(ts).normalize()]
         if len(daily_hist) < 60:
             continue
 
@@ -446,6 +568,10 @@ def historische_signale(stunden):
         if entry is None or stop is None or tp1 is None:
             continue
 
+        if letzte_pruefung == (str(ts), float(entry)):
+            continue
+        letzte_pruefung = (str(ts), float(entry))
+
         in_observation = {
             "strategie": "C",
             "entry_zeit": str(ts),
@@ -462,12 +588,29 @@ def historische_signale(stunden):
             "tp2_erreicht": False,
             "erstes_ereignis": None,
             "zweites_ereignis": None,
+            "stop_nach_tp1": False,
+            "stop_basis_aktuell": "initiale_chartstruktur",
+            "management_entscheidung": None,
+            "management_letzte_pruefung": None,
+            "management_naechstes_ziel": None,
+            "management_naechstes_ziel_crv": None,
+            "management_swing_low": None,
+            "letztes_swing_low": None,
+            "letztes_swing_low_zeit": None,
+            "ausstieg_preis": None,
+            "rendite_pct": None,
         }
 
     if in_observation is not None:
+        letzter_close = float(stunden.iloc[-1]["Close"])
         trades.append({
             **in_observation,
             "ausstieg_zeit": str(stunden.index[-1]),
+            "ausstieg_preis": letzter_close,
+            "rendite_pct": round(
+                (letzter_close / in_observation["entry"] - 1.0) * 100.0,
+                4,
+            ),
             "zweites_ereignis": "DATENENDE",
         })
 
@@ -482,6 +625,9 @@ def kennzahlen(trades):
             "Stop_vor_TP1_%": 0.0,
             "TP2_vorhanden_%": 0.0,
             "TP2_erreicht_von_vorhanden_%": 0.0,
+            "TP1_management_ohne_teilverkauf_%": 0.0,
+            "Ø_Rendite_%": 0.0,
+            "Median_Rendite_%": 0.0,
             "Hinweis": "Keine zulaessigen C-Signale im Backtest.",
         }
 
@@ -490,18 +636,27 @@ def kennzahlen(trades):
     stop1 = int((trades["erstes_ereignis"] == "STOP_VOR_TP1").sum())
     tp2_vorhanden = int((trades["tp2_status"] == "vorhanden").sum())
     tp2_hit = int(trades["tp2_erreicht"].sum())
+    management_count = int(
+        trades.loc[trades["tp1_erreicht"], "stop_nach_tp1"].fillna(False).sum()
+    )
+    renditen = pd.to_numeric(trades["rendite_pct"], errors="coerce").dropna()
     return {
         "Signale": n,
         "TP1_erreicht_%": round(tp1 / n * 100, 1),
         "Stop_vor_TP1_%": round(stop1 / n * 100, 1),
         "TP2_vorhanden_%": round(tp2_vorhanden / n * 100, 1),
         "TP2_erreicht_von_vorhanden_%": round(tp2_hit / tp2_vorhanden * 100, 1) if tp2_vorhanden else 0.0,
+        "TP1_management_ohne_teilverkauf_%": round(management_count / tp1 * 100, 1) if tp1 else 0.0,
+        "Ø_Rendite_%": round(float(renditen.mean()), 4) if not renditen.empty else 0.0,
+        "Median_Rendite_%": round(float(renditen.median()), 4) if not renditen.empty else 0.0,
         "Ø_TP1_CRV": round(float(trades["tp1_crv"].mean()), 3),
         "Ø_TP2_CRV_vorhanden": round(float(trades.loc[trades["tp2_status"] == "vorhanden", "tp2_crv"].mean()), 3)
         if tp2_vorhanden else None,
         "Hinweis": (
-            "Signal-/Zielqualitaet, noch keine C-P&L. "
-            "Positionsmanagement nach TP1/bei fehlendem TP2 ist noch separat festzulegen."
+            "C-Positionsmanagement aktiv: kein Teilverkauf. TP1 ist Managementpunkt; "
+            "bei Fortsetzung wird gehalten, Stop mindestens auf Break-even und danach "
+            "nur ueber bestaetigte Higher-Lows/Swing-Lows nachgezogen. "
+            "TP2 fuehrt zum 100%-Exit; ohne TP2 wird strukturbasiert weiter getrailt."
         ),
     }
 
