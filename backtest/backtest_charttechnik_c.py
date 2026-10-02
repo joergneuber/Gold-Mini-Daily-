@@ -89,7 +89,6 @@ def hole_ausschnitt(start, ende, max_versuche=4):
                     "order": "ASC",
                     "start_date": start.isoformat(),
                     "end_date": ende.isoformat(),
-                    "outputsize": 5000,
                 },
                 timeout=60,
             )
