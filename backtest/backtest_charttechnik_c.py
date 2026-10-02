@@ -56,6 +56,7 @@ EVAL_EVERY_N_BARS = max(1, int(os.getenv("C_EVAL_EVERY_N_BARS", "1")))
 MAX_EVAL_BARS = int(os.getenv("C_MAX_EVAL_BARS", "0"))
 HORIZON_BARS = max(24, int(os.getenv("C_HORIZON_BARS", "240")))
 API_URL = "https://api.twelvedata.com/time_series"
+EARLIEST_URL = "https://api.twelvedata.com/earliest_timestamp"
 
 
 def _load_module(name, path):
@@ -73,6 +74,90 @@ def hole_api_key():
     key = os.getenv("TWELVEDATA_API_KEY")
     if not key:
         raise EnvironmentError("TWELVEDATA_API_KEY nicht gesetzt.")
+    return key
+
+
+def _parse_earliest_timestamp(payload):
+    """Liest die von Twelve Data gelieferte frueheste Zeit robust aus."""
+    wert = payload.get("datetime")
+    if wert is None:
+        wert = payload.get("earliest_timestamp")
+    if wert is None:
+        wert = payload.get("timestamp")
+
+    if wert is None:
+        raise RuntimeError(
+            "Twelve-Data-Antwort fuer /earliest_timestamp enthaelt kein "
+            f"Datums-/Timestamp-Feld: {payload}"
+        )
+
+    if isinstance(wert, (int, float)):
+        return pd.to_datetime(wert, unit="s", utc=True)
+
+    text = str(wert).strip()
+    if text.isdigit():
+        return pd.to_datetime(int(text), unit="s", utc=True)
+    return pd.to_datetime(text, utc=True)
+
+
+def hole_fruehestes_datum(max_versuche=4):
+    """Ermittelt das tatsaechlich verfuegbare frueheste 1h-Datum bei Twelve Data."""
+    key = hole_api_key()
+    letzter_fehler = None
+
+    for versuch in range(1, max_versuche + 1):
+        try:
+            antwort = requests.get(
+                EARLIEST_URL,
+                params={
+                    "symbol": SYMBOL,
+                    "interval": INTERVALL,
+                    "apikey": key,
+                },
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            letzter_fehler = exc
+            if versuch < max_versuche:
+                warte = 10 * versuch
+                print(f"Netzwerkfehler bei /earliest_timestamp: {exc}; warte {warte}s")
+                time.sleep(warte)
+                continue
+            raise RuntimeError(
+                f"Twelve Data /earliest_timestamp nach {max_versuche} Versuchen nicht erreichbar: {exc}"
+            ) from exc
+
+        if antwort.status_code == 429:
+            if versuch < max_versuche:
+                print(f"Rate-Limit bei /earliest_timestamp; warte 65s")
+                time.sleep(65)
+                continue
+            raise RuntimeError("Twelve-Data-Rate-Limit bei /earliest_timestamp konnte nicht aufgeloest werden.")
+
+        try:
+            payload = antwort.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Ungueltige JSON-Antwort von Twelve Data /earliest_timestamp "
+                f"(HTTP {antwort.status_code}): {antwort.text[:500]}"
+            ) from exc
+
+        if antwort.status_code >= 400 or payload.get("status") == "error":
+            raise RuntimeError(
+                f"Twelve-Data-Fehler bei /earliest_timestamp "
+                f"(HTTP {antwort.status_code}): {payload}"
+            )
+
+        try:
+            frueheste = _parse_earliest_timestamp(payload)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Twelve-Data-Antwort fuer /earliest_timestamp konnte nicht ausgewertet werden: {payload}"
+            ) from exc
+
+        return frueheste.date()
+
+    raise RuntimeError(f"Fruehestes 1h-Datum konnte nicht ermittelt werden: {letzter_fehler}")
 
 
 def hole_ausschnitt(start, ende, max_versuche=4):
@@ -107,10 +192,18 @@ def hole_ausschnitt(start, ende, max_versuche=4):
                 continue
             raise RuntimeError("Twelve-Data-Rate-Limit konnte nicht aufgeloest werden.")
 
-        antwort.raise_for_status()
-        daten = antwort.json()
-        if daten.get("status") == "error" or "values" not in daten:
-            raise RuntimeError(f"Twelve-Data-Fehler: {daten}")
+        try:
+            daten = antwort.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Ungueltige JSON-Antwort von Twelve Data fuer {start} bis {ende} "
+                f"(HTTP {antwort.status_code}): {antwort.text[:500]}"
+            ) from exc
+        if antwort.status_code >= 400 or daten.get("status") == "error" or "values" not in daten:
+            raise RuntimeError(
+                f"Twelve-Data-Fehler fuer {start} bis {ende} "
+                f"(HTTP {antwort.status_code}): {daten}"
+            )
 
         df = pd.DataFrame(daten["values"])
         df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
@@ -136,8 +229,20 @@ def hole_daten():
 
     hole_api_key()
     heute = date.today()
+    fruehestes_1h_datum = hole_fruehestes_datum()
+    start = max(START_DATUM, fruehestes_1h_datum)
+
+    print(f"Angeforderter 1h-Backtestbeginn: {START_DATUM}")
+    print(f"Fruehestes verfuegbares XAU/USD-1h-Datum: {fruehestes_1h_datum}")
+    print(f"Effektiver 1h-Backtestbeginn: {start}")
+
+    if start > heute:
+        raise RuntimeError(
+            f"Das frueheste verfuegbare 1h-Datum {start} liegt in der Zukunft; "
+            "historischer Backtest kann nicht gestartet werden."
+        )
+
     teile = []
-    start = START_DATUM
     while start < heute:
         ende = min(start + timedelta(days=CHUNK_TAGE - 1), heute)
         print(f"Hole XAU/USD 1h: {start} bis {ende}")
@@ -182,7 +287,6 @@ def hole_tagesdaten(stunden):
                     "order": "ASC",
                     "start_date": start.isoformat(),
                     "end_date": ende.isoformat(),
-                    "outputsize": 5000,
                 },
                 timeout=60,
             )
@@ -196,10 +300,17 @@ def hole_tagesdaten(stunden):
                 time.sleep(65)
                 continue
             raise RuntimeError("Twelve-Data-Rate-Limit bei Tagesdaten.")
-        antwort.raise_for_status()
-        daten = antwort.json()
-        if daten.get("status") == "error" or "values" not in daten:
-            raise RuntimeError(f"Twelve-Data-Tagesfehler: {daten}")
+        try:
+            daten = antwort.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Ungueltige JSON-Antwort von Twelve Data fuer Tagesdaten "
+                f"(HTTP {antwort.status_code}): {antwort.text[:500]}"
+            ) from exc
+        if antwort.status_code >= 400 or daten.get("status") == "error" or "values" not in daten:
+            raise RuntimeError(
+                f"Twelve-Data-Tagesfehler (HTTP {antwort.status_code}): {daten}"
+            )
         df = pd.DataFrame(daten["values"])
         df["Datum"] = pd.to_datetime(df["datetime"], utc=True)
         df = df.rename(
@@ -398,6 +509,9 @@ def main():
 
     stats = kennzahlen(trades)
     stats.update({
+        "Angeforderter_Start_1h": str(START_DATUM),
+        "Tatsaechlich_verfuegbarer_Start_1h": str(stunden.index.min().date()),
+        "Effektiver_Start_1h": str(stunden.index.min().date()),
         "Zeitraum_1h": f"{stunden.index.min()} bis {stunden.index.max()}",
         "Tagesdaten": f"{daily.index.min()} bis {daily.index.max()}",
         "EVAL_EVERY_N_BARS": EVAL_EVERY_N_BARS,
