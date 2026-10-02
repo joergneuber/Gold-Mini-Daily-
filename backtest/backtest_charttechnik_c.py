@@ -50,7 +50,7 @@ TEST_MODULE_PATH = ROOT / "test" / "Charttechnik" / "mini_daily_gold.py"
 SYMBOL = "XAU/USD"
 INTERVALL = "1h"
 START_DATUM = date.fromisoformat(os.getenv("C_START_DATE", "2019-01-01"))
-CHUNK_TAGE = int(os.getenv("C_CHUNK_DAYS", "180"))
+CHUNK_TAGE = int(os.getenv("C_CHUNK_DAYS", "200"))
 WARMUP_TAGE = int(os.getenv("C_WARMUP_DAYS", "180"))
 EVAL_EVERY_N_BARS = max(1, int(os.getenv("C_EVAL_EVERY_N_BARS", "1")))
 MAX_EVAL_BARS = int(os.getenv("C_MAX_EVAL_BARS", "0"))
@@ -250,7 +250,7 @@ def hole_daten():
         if not teil.empty:
             teile.append(teil)
         start = ende + timedelta(days=1)
-        time.sleep(8)
+        time.sleep(5)
 
     if not teile:
         raise RuntimeError("Keine XAU/USD-1h-Daten erhalten.")
@@ -330,7 +330,6 @@ def historische_signale(stunden):
     if len(daily) < 180:
         raise RuntimeError("Zu wenig Tageshistorie fuer die 6M-Struktur.")
 
-    start_index = max(1, int(len(stunden) * 0))
     warmup_ts = stunden.index[0] + pd.Timedelta(days=WARMUP_TAGE)
     eligible = [
         i for i, ts in enumerate(stunden.index)
@@ -341,11 +340,18 @@ def historische_signale(stunden):
 
     trades = []
     in_observation = None
-    letzte_pruefung = None
 
+    # Cache fuer die abgeschlossene Tageshistorie. Alle Intraday-Bars desselben
+    # UTC-Tages verwenden exakt dieselbe Tageshistorie; die bisherige boolesche
+    # DataFrame-Selektion wurde deshalb bei jeder Stunde erneut ausgefuehrt.
+    daily_hist_cache = {}
+
+    gesamt = len(eligible)
     for pos, i in enumerate(eligible):
         if pos % EVAL_EVERY_N_BARS:
             continue
+        if pos and pos % 1000 == 0:
+            print(f"C-Backtest Fortschritt: {pos}/{gesamt} Bars ({pos / gesamt * 100:.1f}%)")
 
         ts = stunden.index[i]
         bar = stunden.iloc[i]
@@ -405,7 +411,12 @@ def historische_signale(stunden):
 
         # Nur abgeschlossene Tagesdaten verwenden: die aktuelle Tageskerze
         # ist waehrend eines Intraday-Checks noch nicht vollstaendig bekannt.
-        daily_hist = daily[daily.index < pd.Timestamp(ts).normalize()]
+        day_key = pd.Timestamp(ts).normalize()
+        daily_hist = daily_hist_cache.get(day_key)
+        if daily_hist is None:
+            daily_end = daily.index.searchsorted(day_key, side="left")
+            daily_hist = daily.iloc[:daily_end]
+            daily_hist_cache[day_key] = daily_hist
         if len(daily_hist) < 60:
             continue
 
@@ -434,10 +445,6 @@ def historische_signale(stunden):
 
         if entry is None or stop is None or tp1 is None:
             continue
-
-        if letzte_pruefung == (str(ts), float(entry)):
-            continue
-        letzte_pruefung = (str(ts), float(entry))
 
         in_observation = {
             "strategie": "C",
