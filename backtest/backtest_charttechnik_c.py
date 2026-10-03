@@ -415,17 +415,8 @@ def _update_post_tp1_management(stunden, i, ts, close, position):
     """
     snapshot = _management_snapshot(stunden, i, position)
     old_stop = float(position["stop"])
-    new_stop = old_stop
-    stop_basis = position.get("stop_basis_aktuell") or "break_even_nach_TP1"
-
-    # Break-even wird nur dann als aktuelle Basis dokumentiert, wenn der
-    # Stop tatsaechlich von unterhalb Entry auf Entry angehoben wurde. Ein
-    # bereits hoeherer struktureller Stop darf nicht bei jeder Folgepruefung
-    # wieder als "break_even_nach_TP1" etikettiert werden.
-    entry = float(position["entry"])
-    if old_stop < entry:
-        new_stop = entry
-        stop_basis = "break_even_nach_TP1"
+    new_stop = max(old_stop, float(position["entry"]))
+    stop_basis = "break_even_nach_TP1"
 
     swing_low = snapshot.get("swing_low")
     if swing_low is not None:
@@ -461,13 +452,11 @@ def historische_signale(stunden):
     if len(daily) < 180:
         raise RuntimeError("Zu wenig Tageshistorie fuer die 6M-Struktur.")
 
-    start_index = max(1, int(len(stunden) * 0))
-    # Die Historie vor START_DATUM dient ausschliesslich als Warmup fuer
-    # Indikatoren/Strukturen. Bewertet werden erst Bars ab START_DATUM.
-    eligible = [
-        i for i, ts in enumerate(stunden.index)
-        if ts >= pd.Timestamp(START_DATUM, tz="UTC")
-    ]
+    # Strikte Trennung von Warmup und Bewertungszeitraum:
+    # Warmup-Daten bleiben fuer Indikatoren/Strukturen verfuegbar,
+    # koennen aber niemals selbst ein C-Signal oder einen Trade erzeugen.
+    eval_start_ts = pd.Timestamp(START_DATUM, tz="UTC")
+    eligible = [i for i, ts in enumerate(stunden.index) if ts >= eval_start_ts]
     if MAX_EVAL_BARS > 0:
         eligible = eligible[-MAX_EVAL_BARS:]
 
@@ -595,36 +584,6 @@ def historische_signale(stunden):
             close,
         )
 
-        tp = chain.get("tp", {})
-        tp2_pruefung = tp.get("tp2_pruefung") or {}
-        tp2_kandidat = tp2_pruefung.get("kandidat") or {}
-        tp_kandidaten = tp.get("alle_tp_kandidaten") or []
-        kandidat_preis = tp2_kandidat.get("preis")
-        spaetere_kandidaten = []
-        if kandidat_preis is not None:
-            for kandidat in tp_kandidaten:
-                preis = kandidat.get("preis")
-                if preis is None or float(preis) <= float(kandidat_preis) + 1e-6:
-                    continue
-                if kandidat.get("charttechnisch_gueltig"):
-                    spaetere_kandidaten.append({
-                        "preis": float(preis),
-                        "crv": kandidat.get("crv"),
-                        "verworfen": bool(kandidat.get("verworfen", False)),
-                        "verwerfungsgrund": kandidat.get("verwerfungsgrund"),
-                    })
-        tp2_spaetere_vorhanden = bool(spaetere_kandidaten)
-        # Spaetere Strukturen duerfen natuerlich existieren. "Keine Struktur
-        # uebersprungen" bedeutet hier deshalb nicht "keine spaetere Struktur
-        # vorhanden", sondern: Der gepruefte TP2-Kandidat ist der erste
-        # charttechnisch gueltige Kandidat nach TP1. Genau das ist die
-        # verbindliche TP2-Kette; spaetere Kandidaten werden nicht zur Auswahl
-        # herangezogen.
-        tp2_kein_ueberspringen = bool(
-            tp2_pruefung.get("status") in {"zugelassen", "verworfen"}
-            and kandidat_preis is not None
-        )
-
         trade = chain.get("trade", {})
         if trade.get("status") != "trade_zulaessig":
             continue
@@ -674,13 +633,9 @@ def historische_signale(stunden):
             "pnl_zaehlt": True,
             "initial_stop": float(stop),
             "stop_history": [],
-            "tp2_pruefstatus": tp2_pruefung.get("status"),
-            "tp2_pruefkandidat_preis": tp2_kandidat.get("preis"),
-            "tp2_pruefkandidat_crv": tp2_kandidat.get("crv"),
-            "tp2_pruefkandidat_grund": tp2_pruefung.get("grund"),
-            "tp2_spaetere_kandidaten_vorhanden": tp2_spaetere_vorhanden,
-            "tp2_spaetere_kandidaten": spaetere_kandidaten,
-            "tp2_keine_struktur_uebersprungen": tp2_kein_ueberspringen,
+            "tp2_pruefstatus": (chain.get("tp", {}).get("tp2_pruefung") or {}).get("status"),
+            "tp2_pruefkandidat_preis": ((chain.get("tp", {}).get("tp2_pruefung") or {}).get("kandidat") or {}).get("preis"),
+            "tp2_pruefkandidat_crv": ((chain.get("tp", {}).get("tp2_pruefung") or {}).get("kandidat") or {}).get("crv"),
         }
 
     if in_observation is not None:
@@ -735,12 +690,6 @@ def kennzahlen(trades):
         "Stop_vor_TP1_%": round(stop1 / n * 100, 1),
         "TP2_vorhanden_%": round(tp2_vorhanden / n * 100, 1),
         "TP2_erreicht_von_vorhanden_%": round(tp2_hit / tp2_vorhanden * 100, 1) if tp2_vorhanden else 0.0,
-        "TP2_Spaetere_Strukturen_trotz_Kandidat_%": round(
-            float(trades["tp2_spaetere_kandidaten_vorhanden"].fillna(False).astype(bool).mean()) * 100, 1
-        ) if "tp2_spaetere_kandidaten_vorhanden" in trades.columns else 0.0,
-        "TP2_Keine_Struktur_uebersprungen_%": round(
-            float(trades["tp2_keine_struktur_uebersprungen"].dropna().astype(bool).mean()) * 100, 1
-        ) if "tp2_keine_struktur_uebersprungen" in trades.columns and trades["tp2_keine_struktur_uebersprungen"].notna().any() else 0.0,
         "TP1_management_ohne_teilverkauf_%": round(management_count / tp1 * 100, 1) if tp1 else 0.0,
         "Ø_Rendite_%": round(float(renditen.mean()), 4) if not renditen.empty else 0.0,
         "Median_Rendite_%": round(float(renditen.median()), 4) if not renditen.empty else 0.0,
@@ -773,8 +722,11 @@ def main():
     stats.update({
         "Angeforderter_Start_1h": str(START_DATUM),
         "Tatsaechlich_verfuegbarer_Start_1h": str(stunden.index.min().date()),
-        "Effektiver_Start_1h": str(stunden.index.min().date()),
-        "Zeitraum_1h": f"{stunden.index.min()} bis {stunden.index.max()}",
+        "Warmup_Start_1h": str(stunden.index.min().date()),
+        "Bewertungs_Start_1h": str(START_DATUM),
+        "Warmup_Zeitraum_1h": f"{stunden.index.min()} bis {stunden.index.max()}",
+        "Bewertungszeitraum_1h": f"{START_DATUM} bis {stunden.index.max().date()}",
+        "Bewertungsbars": int((stunden.index >= pd.Timestamp(START_DATUM, tz="UTC")).sum()),
         "Tagesdaten": f"{daily.index.min()} bis {daily.index.max()}",
         "EVAL_EVERY_N_BARS": EVAL_EVERY_N_BARS,
         "HORIZON_BARS": HORIZON_BARS,
