@@ -385,6 +385,18 @@ def _management_snapshot(stunden, i, position):
     }
 
 
+def _record_stop_change(position, ts, old_stop, new_stop, basis):
+    """Protokolliert jede echte Stop-Aenderung chronologisch fuer das Audit."""
+    if abs(float(new_stop) - float(old_stop)) < 1e-12:
+        return
+    position.setdefault("stop_history", []).append({
+        "zeit": str(ts),
+        "alter_stop": float(old_stop),
+        "neuer_stop": float(new_stop),
+        "basis": str(basis),
+    })
+
+
 def _update_post_tp1_management(stunden, i, ts, close, position):
     """Aktualisiert den Stop nach TP1 ohne Teilverkauf.
 
@@ -406,6 +418,7 @@ def _update_post_tp1_management(stunden, i, ts, close, position):
             position["letztes_swing_low"] = candidate
             position["letztes_swing_low_zeit"] = swing_low["zeit"]
 
+    _record_stop_change(position, ts, old_stop, new_stop, stop_basis)
     position["stop"] = new_stop
     position["stop_basis_aktuell"] = stop_basis
     position["stop_nach_tp1"] = True
@@ -451,37 +464,27 @@ def historische_signale(stunden):
         bar = stunden.iloc[i]
         close = float(bar["Close"])
 
-        # Bereits laufendes Signal: Positionsmanagement nach den finalen C-Regeln.
+        # Bereits laufendes Signal: erst den zu Beginn dieser Kerze gueltigen
+        # Stop pruefen. Neue Strukturen werden erst fuer die Folgekerze wirksam.
         if in_observation is not None:
             if i <= in_observation["entry_index"]:
                 continue
 
             high = float(bar["High"])
             low = float(bar["Low"])
+            stop_zu_beginn = float(in_observation["stop"]) if in_observation["stop"] is not None else None
 
-            # Nach TP1 wird die Position NICHT teilverkauft. Der Management-Stop
-            # wird nur auf Basis bereits bestaetigter Strukturen nachgezogen.
-            if in_observation["tp1_erreicht"]:
-                _update_post_tp1_management(
-                    stunden, i, ts, close, in_observation
-                )
-
-            # Konservativ: Stop vor Ziel, falls beides in derselben Kerze liegt.
-            # Der Stop wird nie rueckwirkend innerhalb der TP1-Kerze angewendet;
-            # die TP1-Kerze wird erst nach ihrer Auswertung fuer das Management
-            # des Folgebars verwendet.
-            if in_observation["stop"] is not None and low <= in_observation["stop"]:
+            if stop_zu_beginn is not None and low <= stop_zu_beginn:
                 if in_observation["tp1_erreicht"]:
                     in_observation["zweites_ereignis"] = "STOP_NACH_TP1"
                 else:
                     in_observation["erstes_ereignis"] = "STOP_VOR_TP1"
                 in_observation["ausstieg_index"] = i
                 in_observation["ausstieg_zeit"] = str(ts)
-                in_observation["ausstieg_preis"] = float(in_observation["stop"])
-                in_observation["rendite_pct"] = round(
-                    (float(in_observation["stop"]) / in_observation["entry"] - 1.0) * 100.0,
-                    4,
-                )
+                in_observation["ausstieg_preis"] = stop_zu_beginn
+                in_observation["rendite_pct"] = round((stop_zu_beginn / in_observation["entry"] - 1.0) * 100.0, 4)
+                in_observation["positionsstatus"] = "GESCHLOSSEN"
+                in_observation["pnl_zaehlt"] = True
                 trades.append(dict(in_observation))
                 in_observation = None
                 continue
@@ -491,11 +494,20 @@ def historische_signale(stunden):
                 in_observation["tp1_zeit"] = str(ts)
                 in_observation["tp1_bars_nach_entry"] = i - in_observation["entry_index"]
 
-                # TP1 = Managementpunkt, kein Verkauf. Ab hier mindestens
-                # Break-even; weitere Stop-Nachzuege erfolgen nur ueber bestaetigte
-                # Higher-Lows/Swing-Lows.
-                _update_post_tp1_management(
-                    stunden, i, ts, close, in_observation
+                # TP1 = Managementpunkt, kein Verkauf. Der Break-even-Stop
+                # wird ab der Folgekerze wirksam; kein nachtraegliches Repricing
+                # innerhalb der TP1-Kerze.
+                alter_stop = float(in_observation["stop"])
+                neuer_stop = max(alter_stop, float(in_observation["entry"]))
+                _record_stop_change(in_observation, ts, alter_stop, neuer_stop, "break_even_nach_TP1")
+                in_observation["stop"] = neuer_stop
+                in_observation["stop_basis_aktuell"] = "break_even_nach_TP1"
+                in_observation["stop_nach_tp1"] = True
+                in_observation["management_letzte_pruefung"] = str(ts)
+                in_observation["management_entscheidung"] = (
+                    "POSITION_HALTEN_BIS_TP2_ODER_TRAILING_STOP"
+                    if in_observation.get("tp2") is not None
+                    else "POSITION_WEITER_STRUKTURBASIERT_TRAILEN"
                 )
 
             if (
@@ -514,22 +526,30 @@ def historische_signale(stunden):
                     4,
                 )
                 in_observation["management_entscheidung"] = "TP2_100_PROZENT_EXIT"
+                in_observation["positionsstatus"] = "GESCHLOSSEN"
+                in_observation["pnl_zaehlt"] = True
                 trades.append(dict(in_observation))
                 in_observation = None
                 continue
 
+            # Neue bestaetigte Swing-/Higher-Low-Strukturen werden erst nach
+            # der aktuellen Kerze als Stop fuer die Folgekerze aktiviert.
+            if in_observation["tp1_erreicht"]:
+                _update_post_tp1_management(stunden, i, ts, close, in_observation)
+
             if i - in_observation["entry_index"] >= HORIZON_BARS:
                 in_observation["ausstieg_index"] = i
                 in_observation["ausstieg_zeit"] = str(ts)
-                in_observation["ausstieg_preis"] = close
+                in_observation["ausstieg_preis"] = None
+                in_observation["mark_to_market_preis"] = close
+                in_observation["mark_to_market_rendite_pct"] = round((close / in_observation["entry"] - 1.0) * 100.0, 4)
                 in_observation["zweites_ereignis"] = (
-                    "HORIZONT_NACH_TP1" if in_observation["tp1_erreicht"]
-                    else "HORIZONT_OHNE_TP1"
+                    "HORIZONT_NACH_TP1_OFFEN" if in_observation["tp1_erreicht"]
+                    else "HORIZONT_OHNE_TP1_OFFEN"
                 )
-                in_observation["rendite_pct"] = round(
-                    (close / in_observation["entry"] - 1.0) * 100.0,
-                    4,
-                )
+                in_observation["positionsstatus"] = "OFFEN_AM_HORIZONT"
+                in_observation["pnl_zaehlt"] = False
+                in_observation["rendite_pct"] = None
                 trades.append(dict(in_observation))
                 in_observation = None
                 continue
@@ -599,19 +619,29 @@ def historische_signale(stunden):
             "letztes_swing_low_zeit": None,
             "ausstieg_preis": None,
             "rendite_pct": None,
+            "mark_to_market_preis": None,
+            "mark_to_market_rendite_pct": None,
+            "positionsstatus": "OFFEN",
+            "pnl_zaehlt": True,
+            "initial_stop": float(stop),
+            "stop_history": [],
+            "tp2_pruefstatus": (chain.get("tp", {}).get("tp2_pruefung") or {}).get("status"),
+            "tp2_pruefkandidat_preis": ((chain.get("tp", {}).get("tp2_pruefung") or {}).get("kandidat") or {}).get("preis"),
+            "tp2_pruefkandidat_crv": ((chain.get("tp", {}).get("tp2_pruefung") or {}).get("kandidat") or {}).get("crv"),
         }
 
     if in_observation is not None:
         letzter_close = float(stunden.iloc[-1]["Close"])
         trades.append({
             **in_observation,
-            "ausstieg_zeit": str(stunden.index[-1]),
-            "ausstieg_preis": letzter_close,
-            "rendite_pct": round(
-                (letzter_close / in_observation["entry"] - 1.0) * 100.0,
-                4,
-            ),
-            "zweites_ereignis": "DATENENDE",
+            "ausstieg_zeit": None,
+            "ausstieg_preis": None,
+            "mark_to_market_preis": letzter_close,
+            "mark_to_market_rendite_pct": round((letzter_close / in_observation["entry"] - 1.0) * 100.0, 4),
+            "rendite_pct": None,
+            "zweites_ereignis": "DATENENDE_OFFEN",
+            "positionsstatus": "OFFEN_AM_DATENENDE",
+            "pnl_zaehlt": False,
         })
 
     return pd.DataFrame(trades), daily
@@ -639,9 +669,15 @@ def kennzahlen(trades):
     management_count = int(
         trades.loc[trades["tp1_erreicht"], "stop_nach_tp1"].fillna(False).sum()
     )
-    renditen = pd.to_numeric(trades["rendite_pct"], errors="coerce").dropna()
+    renditen = pd.to_numeric(trades.loc[trades["pnl_zaehlt"].fillna(False), "rendite_pct"], errors="coerce").dropna()
+    offene = int((~trades["pnl_zaehlt"].fillna(False)).sum())
+    stop_hist = int(trades.loc[trades["tp1_erreicht"], "stop_history"].apply(lambda x: isinstance(x, list) and len(x) > 0).sum())
     return {
         "Signale": n,
+        "Geschlossene_Positionen": n - offene,
+        "Offene_Positionen_am_Horizont_oder_Datenende": offene,
+        "Offene_PnL_nicht_eingerechnet": True,
+        "TP1_Stop_Historie_vorhanden": stop_hist,
         "TP1_erreicht_%": round(tp1 / n * 100, 1),
         "Stop_vor_TP1_%": round(stop1 / n * 100, 1),
         "TP2_vorhanden_%": round(tp2_vorhanden / n * 100, 1),
@@ -667,7 +703,12 @@ def main():
 
     stunden.to_csv("charttechnik_c_1h_daten.csv")
     daily.to_csv("charttechnik_c_daily_daten.csv")
-    trades.to_csv("backtest_charttechnik_c_signale.csv", index=False)
+    export_trades = trades.copy()
+    if "stop_history" in export_trades.columns:
+        export_trades["stop_history"] = export_trades["stop_history"].apply(
+            lambda value: json.dumps(value, ensure_ascii=False) if isinstance(value, list) else value
+        )
+    export_trades.to_csv("backtest_charttechnik_c_signale.csv", index=False)
 
     stats = kennzahlen(trades)
     stats.update({
