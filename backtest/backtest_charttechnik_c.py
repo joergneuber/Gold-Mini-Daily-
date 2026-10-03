@@ -59,6 +59,7 @@ INTERVALL = "1h"
 START_DATUM = date.fromisoformat(os.getenv("C_START_DATE", "2019-01-01"))
 CHUNK_TAGE = int(os.getenv("C_CHUNK_DAYS", "180"))
 WARMUP_TAGE = int(os.getenv("C_WARMUP_DAYS", "180"))
+DAILY_WARMUP_TAGE = int(os.getenv("C_DAILY_WARMUP_DAYS", "270"))
 EVAL_EVERY_N_BARS = max(1, int(os.getenv("C_EVAL_EVERY_N_BARS", "1")))
 MAX_EVAL_BARS = int(os.getenv("C_MAX_EVAL_BARS", "0"))
 HORIZON_BARS = max(24, int(os.getenv("C_HORIZON_BARS", "240")))
@@ -237,11 +238,16 @@ def hole_daten():
     hole_api_key()
     heute = date.today()
     fruehestes_1h_datum = hole_fruehestes_datum()
-    start = max(START_DATUM, fruehestes_1h_datum)
+    # Fuer kurze Backtest-Zeitraeume wird die notwendige Warmup-Historie
+    # separat vor dem eigentlichen Bewertungsbeginn geladen. Dadurch bleibt
+    # START_DATUM der echte erste Bewertungszeitpunkt.
+    warmup_start = START_DATUM - timedelta(days=WARMUP_TAGE)
+    start = max(warmup_start, fruehestes_1h_datum)
 
     print(f"Angeforderter 1h-Backtestbeginn: {START_DATUM}")
     print(f"Fruehestes verfuegbares XAU/USD-1h-Datum: {fruehestes_1h_datum}")
-    print(f"Effektiver 1h-Backtestbeginn: {start}")
+    print(f"1h-Warmup-Beginn: {start}")
+    print(f"Effektiver Bewertungsbeginn: {START_DATUM}")
 
     if start > heute:
         raise RuntimeError(
@@ -280,7 +286,10 @@ def hole_tagesdaten(stunden):
     key = os.getenv("TWELVEDATA_API_KEY")
     if not key:
         raise EnvironmentError("TWELVEDATA_API_KEY nicht gesetzt.")
-    start = START_DATUM
+    # Die 6M-Strukturanalyse benoetigt rund 180 Handelstage.
+    # 270 Kalendertage liefern dafuer auch an Feiertags-/Wochenendgrenzen
+    # ausreichend Werktage. Die Bewertung selbst beginnt erst bei START_DATUM.
+    start = START_DATUM - timedelta(days=DAILY_WARMUP_TAGE)
     ende = date.today()
     for versuch in range(1, 5):
         try:
@@ -444,10 +453,11 @@ def historische_signale(stunden):
         raise RuntimeError("Zu wenig Tageshistorie fuer die 6M-Struktur.")
 
     start_index = max(1, int(len(stunden) * 0))
-    warmup_ts = stunden.index[0] + pd.Timedelta(days=WARMUP_TAGE)
+    # Die Historie vor START_DATUM dient ausschliesslich als Warmup fuer
+    # Indikatoren/Strukturen. Bewertet werden erst Bars ab START_DATUM.
     eligible = [
         i for i, ts in enumerate(stunden.index)
-        if ts >= warmup_ts
+        if ts >= pd.Timestamp(START_DATUM, tz="UTC")
     ]
     if MAX_EVAL_BARS > 0:
         eligible = eligible[-MAX_EVAL_BARS:]
